@@ -2,9 +2,9 @@ services:
   postgres:
     image: pgvector/pgvector:pg15
     environment:
-      POSTGRES_USER: shopright
-      POSTGRES_PASSWORD: shopright_dev
-      POSTGRES_DB: shopright
+      POSTGRES_USER: ${POSTGRES_USER:-shopright}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-shopright}
     ports:
       - "5432:5432"
     volumes:
@@ -23,7 +23,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright
+      - DATABASE_URL=${DATABASE_URL_ASYNC:-postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright}
     depends_on:
       postgres:
         condition: service_healthy
@@ -34,7 +34,7 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright
+      - DATABASE_URL=${DATABASE_URL_ASYNC:-postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright}
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,8 +45,8 @@ services:
     ports:
       - "8003:8003"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright
-      - JWT_SECRET=dev-secret-change-in-prod
+      - DATABASE_URL=${DATABASE_URL_ASYNC:-postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright}
+      - JWT_SECRET=${JWT_SECRET}
     depends_on:
       postgres:
         condition: service_healthy
@@ -57,7 +57,7 @@ services:
     ports:
       - "8004:8004"
     environment:
-      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+      - DATABASE_URL=${DATABASE_URL:-postgresql://shopright:shopright_dev@postgres:5432/shopright}
       - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
       - VERTEX_AI_LOCATION=us-central1
     depends_on:

@@ -66,8 +66,8 @@ jobs:
       - name: Build and push
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/shopright/${{ matrix.image }}
-          API_URL: https://api-gateway-pmhvxm32ba-uc.a.run.app
-          CHATBOT_URL: https://chatbot-service-pmhvxm32ba-uc.a.run.app
+          API_URL: ${{ secrets.API_URL }}
+          CHATBOT_URL: ${{ secrets.CHATBOT_URL }}
         run: |
           if [ "${{ matrix.service }}" = "frontend" ]; then
             docker build \
