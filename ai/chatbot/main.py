@@ -76,11 +76,16 @@ class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     history: Optional[List[ChatMessage]] = []
 
+class ProductSource(BaseModel):
+    id: str
+    name: str
+    price: float
+
 class ChatResponse(BaseModel):
     response: str
     session_id: str
     message_id: str
-    sources: List[str] = []
+    sources: List[ProductSource] = []
     is_unanswered: bool = False
 
 class FeedbackRequest(BaseModel):
@@ -139,7 +144,7 @@ def detect_category(query: str) -> str | None:
     return None
 
 # ── RAG: Hybrid Vector + Keyword Search ───────────────────────────────────────
-async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[str]]:
+async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[ProductSource]]:
     vector = await gemini_embed(query)
     if not vector:
         return "", []
@@ -157,14 +162,14 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
             keyword_pattern = "%(" + "|".join(keywords) + ")%"
             rows = await conn.fetch(
                 """
-                SELECT name, description, category, brand, price, specifications,
+                SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist,
                        CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
                 FROM product_embeddings
                 WHERE category ILIKE $4
                 ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
                 LIMIT $2
-                """,
+""",
                 str(vector), top_k, keyword_pattern, f"%{detected_category}%",
             )
             # Fall back to full catalog if category filter yields nothing
@@ -183,13 +188,13 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
         elif detected_category:
             rows = await conn.fetch(
                 """
-                SELECT name, description, category, brand, price, specifications,
+                SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
                 FROM product_embeddings
                 WHERE category ILIKE $3
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2
-                """,
+""",
                 str(vector), top_k, f"%{detected_category}%",
             )
             if not rows:
@@ -207,24 +212,24 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
             keyword_pattern = "%(" + "|".join(keywords) + ")%"
             rows = await conn.fetch(
                 """
-                SELECT name, description, category, brand, price, specifications,
+                SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist,
                        CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
                 FROM product_embeddings
                 ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
                 LIMIT $2
-                """,
+""",
                 str(vector), top_k, keyword_pattern,
             )
         else:
             rows = await conn.fetch(
                 """
-                SELECT name, description, category, brand, price, specifications,
+                SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
                 FROM product_embeddings
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2
-                """,
+""",
                 str(vector), top_k,
             )
 
@@ -241,7 +246,7 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
                 f"Description: {row['description']}\n"
                 f"Specifications: {row['specifications'] or 'N/A'}\n"
             )
-            sources.append(f"{row['name']} (${row['price']:.2f})")
+            sources.append(ProductSource(id=str(row['product_id']), name=row['name'], price=row['price']))
 
         return "\n---\n".join(context_parts), sources
 
@@ -321,7 +326,7 @@ async def log_to_bigquery(
     message_id: str,
     user_message: str,
     assistant_response: str,
-    sources: list[str],
+    sources: list[ProductSource],
     latency_ms: int,
     is_unanswered: bool,
 ):
@@ -337,7 +342,7 @@ async def log_to_bigquery(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "user_message": user_message,
                 "assistant_response": assistant_response,
-                "sources_used": json.dumps(sources),
+                "sources_used": json.dumps([s.model_dump() for s in sources]),
                 "message_length": len(user_message),
                 "response_length": len(assistant_response),
                 "sources_count": len(sources),

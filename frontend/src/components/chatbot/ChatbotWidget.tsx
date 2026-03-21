@@ -6,11 +6,17 @@ import ReactMarkdown from 'react-markdown'
 
 const CHATBOT_URL = process.env.NEXT_PUBLIC_CHATBOT_URL || 'http://localhost:8004'
 
+interface ProductSource {
+  id: string
+  name: string
+  price: number
+}
+
 interface Message {
   id: string
   role: 'user' | 'assistant'
   content: string
-  sources?: string[]
+  sources?: ProductSource[]
   timestamp: Date
   isUnanswered?: boolean
   rating?: 1 | -1
@@ -157,16 +163,22 @@ export function ChatbotWidget() {
                         ⚠ Couldn't find a match in our catalog
                       </p>
                     )}
-                    {msg.sources && msg.sources.length > 0 && (
-                      <div className="mt-2 pt-2 border-t border-gray-300">
-                        <p className="text-xs text-gray-500 font-medium">Sources:</p>
-                        {msg.sources.map((source, i) => (
-                          <p key={i} className="text-xs text-gray-500">{source}</p>
-                        ))}
-                      </div>
-                    )}
                   </div>
-
+                  {msg.sources && msg.sources.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-1.5 pl-1">
+                      {msg.sources.map(source => (
+                        <a
+                          key={source.id}
+                          href={`/products/${source.id}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-xs bg-white border border-primary/30 text-primary rounded-full px-2.5 py-1 hover:bg-primary/5 transition-colors"
+                        >
+                          {source.name} · <span className="font-medium">${source.price.toFixed(2)}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
                   {/* Rating buttons — only on assistant messages (not the greeting) */}
                   {msg.role === 'assistant' && msg.id !== '0' && (
                     <div className="flex gap-1 pl-1">
