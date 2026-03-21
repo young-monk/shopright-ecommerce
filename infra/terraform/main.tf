@@ -138,6 +138,12 @@ resource "google_cloud_run_v2_service" "product_service" {
       connector = google_vpc_access_connector.connector.id
       egress    = "PRIVATE_RANGES_ONLY"
     }
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [google_sql_database_instance.postgres.connection_name]
+      }
+    }
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/product-service:latest"
       ports { container_port = 8001 }
@@ -147,6 +153,10 @@ resource "google_cloud_run_v2_service" "product_service" {
       }
       resources {
         limits = { cpu = "1", memory = "512Mi" }
+      }
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
       }
     }
   }
@@ -170,6 +180,12 @@ resource "google_cloud_run_v2_service" "order_service" {
       connector = google_vpc_access_connector.connector.id
       egress    = "PRIVATE_RANGES_ONLY"
     }
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [google_sql_database_instance.postgres.connection_name]
+      }
+    }
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/order-service:latest"
       ports { container_port = 8002 }
@@ -179,6 +195,10 @@ resource "google_cloud_run_v2_service" "order_service" {
       }
       resources {
         limits = { cpu = "1", memory = "512Mi" }
+      }
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
       }
     }
   }
@@ -202,6 +222,12 @@ resource "google_cloud_run_v2_service" "user_service" {
       connector = google_vpc_access_connector.connector.id
       egress    = "PRIVATE_RANGES_ONLY"
     }
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [google_sql_database_instance.postgres.connection_name]
+      }
+    }
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/user-service:latest"
       ports { container_port = 8003 }
@@ -220,6 +246,10 @@ resource "google_cloud_run_v2_service" "user_service" {
       }
       resources {
         limits = { cpu = "1", memory = "512Mi" }
+      }
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
       }
     }
   }
@@ -244,6 +274,12 @@ resource "google_cloud_run_v2_service" "chatbot" {
       connector = google_vpc_access_connector.connector.id
       egress    = "PRIVATE_RANGES_ONLY"
     }
+    volumes {
+      name = "cloudsql"
+      cloud_sql_instance {
+        instances = [google_sql_database_instance.postgres.connection_name]
+      }
+    }
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/chatbot:latest"
       ports { container_port = 8004 }
@@ -265,6 +301,10 @@ resource "google_cloud_run_v2_service" "chatbot" {
       }
       resources {
         limits = { cpu = "2", memory = "2Gi" }
+      }
+      volume_mounts {
+        name       = "cloudsql"
+        mount_path = "/cloudsql"
       }
     }
   }
