@@ -59,6 +59,22 @@ resource "google_vpc_access_connector" "connector" {
   machine_type = "f1-micro"
 }
 
+# ── Private Services Access (required for Cloud SQL private IP) ───────────────
+resource "google_compute_global_address" "private_ip_range" {
+  name          = "shopright-private-ip"
+  purpose       = "VPC_PEERING"
+  address_type  = "INTERNAL"
+  prefix_length = 16
+  network       = google_compute_network.vpc.id
+  depends_on    = [google_project_service.apis]
+}
+
+resource "google_service_networking_connection" "private_vpc_connection" {
+  network                 = google_compute_network.vpc.id
+  service                 = "servicenetworking.googleapis.com"
+  reserved_peering_ranges = [google_compute_global_address.private_ip_range.name]
+}
+
 # ── Cloud SQL (PostgreSQL + pgvector) ─────────────────────────────────────────
 resource "google_sql_database_instance" "postgres" {
   name             = "shopright-postgres"
@@ -81,7 +97,10 @@ resource "google_sql_database_instance" "postgres" {
     }
   }
   deletion_protection = var.environment == "prod"
-  depends_on          = [google_project_service.apis]
+  depends_on = [
+    google_project_service.apis,
+    google_service_networking_connection.private_vpc_connection,
+  ]
 }
 
 resource "google_sql_database" "shopright" {
