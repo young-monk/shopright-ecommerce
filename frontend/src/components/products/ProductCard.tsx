@@ -3,6 +3,7 @@ import Image from 'next/image'
 import Link from 'next/link'
 import { Star, ShoppingCart } from 'lucide-react'
 import { useCartStore } from '@/store/cartStore'
+import { getProductImage } from '@/lib/productImage'
 import toast from 'react-hot-toast'
 
 interface Product {
@@ -15,6 +16,7 @@ interface Product {
   imageUrl: string
   brand: string
   sku: string
+  category?: string
 }
 
 export function ProductCard({ product }: { product: Product }) {
@@ -34,7 +36,7 @@ export function ProductCard({ product }: { product: Product }) {
     <Link href={`/products/${product.id}`} className="card group hover:shadow-lg transition-shadow">
       <div className="relative h-48 bg-gray-100">
         <Image
-          src={product.imageUrl || 'https://placehold.co/300x200'}
+          src={getProductImage(product.imageUrl, product.category ?? '')}
           alt={product.name}
           fill
           className="object-contain p-4"

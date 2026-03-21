@@ -53,7 +53,18 @@ export function ProductsContent() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             {data?.products?.map((product: any) => (
-              <ProductCard key={product.id} product={product} />
+              <ProductCard key={product.id} product={{
+                id: product.id,
+                name: product.name,
+                price: product.price,
+                originalPrice: product.original_price,
+                rating: product.rating,
+                reviewCount: product.review_count,
+                imageUrl: product.image_url,
+                brand: product.brand,
+                sku: product.sku,
+                category: product.category,
+              }} />
             ))}
           </div>
         )}
