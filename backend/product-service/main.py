@@ -2,7 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Float, Integer, Boolean, Text, select, and_
+from sqlalchemy import String, Float, Integer, Boolean, Text, select, and_, func
 from pydantic import BaseModel
 from typing import Optional, List
 import os, uuid
@@ -107,11 +107,20 @@ async def list_products(
             (Product.name.ilike(f"%{search}%")) | (Product.description.ilike(f"%{search}%"))
         )
 
+    count_result = await db.execute(select(func.count()).select_from(Product).where(and_(*conditions)))
+    total = count_result.scalar_one()
+
     result = await db.execute(
         select(Product).where(and_(*conditions)).offset(offset).limit(limit)
     )
     products = result.scalars().all()
-    return {"products": [ProductResponse.model_validate(p) for p in products], "total": len(products)}
+    return {
+        "products": [ProductResponse.model_validate(p) for p in products],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "pages": -(-total // limit),  # ceiling division
+    }
 
 @app.get("/products/{product_id}")
 async def get_product(product_id: str, db: AsyncSession = Depends(get_db)):

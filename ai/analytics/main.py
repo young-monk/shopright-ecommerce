@@ -33,9 +33,10 @@ app.add_middleware(
 def get_bq_client():
     return bigquery.Client(project=GCP_PROJECT)
 
-def run_query(sql: str) -> List[Dict[str, Any]]:
+def run_query(sql: str, params: Optional[List] = None) -> List[Dict[str, Any]]:
     client = get_bq_client()
-    return [dict(row) for row in client.query(sql).result()]
+    job_config = bigquery.QueryJobConfig(query_parameters=params or [])
+    return [dict(row) for row in client.query(sql, job_config=job_config).result()]
 
 @app.get("/health")
 async def health():
@@ -167,8 +168,8 @@ async def get_session_detail(session_id: str):
       sources_used,
       sources_count
     FROM {table}
-    WHERE session_id = '{session_id}'
+    WHERE session_id = @session_id
     ORDER BY timestamp ASC
     """
-    messages = run_query(sql)
+    messages = run_query(sql, [bigquery.ScalarQueryParameter("session_id", "STRING", session_id)])
     return {"session_id": session_id, "messages": messages}

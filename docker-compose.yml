@@ -42,7 +42,7 @@ services:
     ports:
       - "8001:8001"
     environment:
-      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+      - DATABASE_URL=postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright
     depends_on:
       - postgres
 
@@ -51,7 +51,7 @@ services:
     ports:
       - "8002:8002"
     environment:
-      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+      - DATABASE_URL=postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright
     depends_on:
       - postgres
 
@@ -60,7 +60,7 @@ services:
     ports:
       - "8003:8003"
     environment:
-      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+      - DATABASE_URL=postgresql+asyncpg://shopright:shopright_dev@postgres:5432/shopright
       - JWT_SECRET=dev-secret-change-in-prod
     depends_on:
       - postgres

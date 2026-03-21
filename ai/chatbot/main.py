@@ -69,7 +69,7 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
         embeddings = embed_model.get_embeddings([query])
         query_vector = embeddings[0].values
 
-        conn = await asyncpg.connect(DATABASE_URL.replace("postgresql://", "postgresql://"))
+        conn = await asyncpg.connect(DATABASE_URL)
 
         # Search product embeddings
         rows = await conn.fetch(
