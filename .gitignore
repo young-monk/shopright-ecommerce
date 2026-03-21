@@ -19,7 +19,7 @@ dist/
 *.tfstate.backup
 *.tfplan
 .terraform.lock.hcl
-prod.tfvars
+# prod.tfvars is committed — it contains no secrets (db_password/jwt_secret go via GitHub secrets)
 
 # Secrets
 .env
