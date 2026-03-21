@@ -1,0 +1,105 @@
+name: Deploy to GCP
+
+on:
+  push:
+    branches: [main]
+
+env:
+  GCP_REGION: us-central1
+  REGISTRY: us-central1-docker.pkg.dev
+
+jobs:
+  build-and-push:
+    name: Build & Push - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # For Workload Identity Federation
+    strategy:
+      matrix:
+        include:
+          - service: frontend
+            context: frontend
+            image: frontend
+            port: 3000
+          - service: api-gateway
+            context: backend/api-gateway
+            image: api-gateway
+            port: 8000
+          - service: product-service
+            context: backend/product-service
+            image: product-service
+            port: 8001
+          - service: order-service
+            context: backend/order-service
+            image: order-service
+            port: 8002
+          - service: user-service
+            context: backend/user-service
+            image: user-service
+            port: 8003
+          - service: chatbot
+            context: ai/chatbot
+            image: chatbot
+            port: 8004
+          - service: analytics
+            context: ai/analytics
+            image: analytics
+            port: 8005
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
+
+      - name: Build and push
+        run: |
+          IMAGE=${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/shopright/${{ matrix.image }}
+          docker build -t $IMAGE:${{ github.sha }} -t $IMAGE:latest ${{ matrix.context }}
+          docker push $IMAGE:${{ github.sha }}
+          docker push $IMAGE:latest
+
+  deploy:
+    name: Deploy Cloud Run Services
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy all services
+        env:
+          PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          SHA: ${{ github.sha }}
+        run: |
+          REGISTRY=${{ env.REGISTRY }}/$PROJECT/shopright
+
+          for service in product-service order-service user-service api-gateway chatbot analytics frontend; do
+            image_name="${service}"
+            gcloud run deploy $service \
+              --image $REGISTRY/$image_name:$SHA \
+              --region ${{ env.GCP_REGION }} \
+              --project $PROJECT \
+              --quiet
+            echo "Deployed $service"
+          done

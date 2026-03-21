@@ -1,0 +1,88 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_USER: shopright
+      POSTGRES_PASSWORD: shopright_dev
+      POSTGRES_DB: shopright
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/sql/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      - ./infra/sql/seeds.sql:/docker-entrypoint-initdb.d/02_seeds.sql
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+      - NEXT_PUBLIC_CHATBOT_URL=http://localhost:8004
+    depends_on:
+      - api-gateway
+
+  api-gateway:
+    build: ./backend/api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - PRODUCT_SERVICE_URL=http://product-service:8001
+      - ORDER_SERVICE_URL=http://order-service:8002
+      - USER_SERVICE_URL=http://user-service:8003
+    depends_on:
+      - product-service
+      - order-service
+      - user-service
+
+  product-service:
+    build: ./backend/product-service
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+    depends_on:
+      - postgres
+
+  order-service:
+    build: ./backend/order-service
+    ports:
+      - "8002:8002"
+    environment:
+      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+    depends_on:
+      - postgres
+
+  user-service:
+    build: ./backend/user-service
+    ports:
+      - "8003:8003"
+    environment:
+      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+      - JWT_SECRET=dev-secret-change-in-prod
+    depends_on:
+      - postgres
+
+  chatbot:
+    build: ./ai/chatbot
+    ports:
+      - "8004:8004"
+    environment:
+      - DATABASE_URL=postgresql://shopright:shopright_dev@postgres:5432/shopright
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - VERTEX_AI_LOCATION=us-central1
+    depends_on:
+      - postgres
+
+  analytics:
+    build: ./ai/analytics
+    ports:
+      - "8005:8005"
+    environment:
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID}
+      - BIGQUERY_DATASET=chat_analytics
+
+volumes:
+  postgres_data:

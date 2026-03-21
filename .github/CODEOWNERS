@@ -1,0 +1,14 @@
+# Global
+* @your-org/platform-team
+
+# Frontend
+/frontend/ @your-org/frontend-team
+
+# Backend
+/backend/ @your-org/backend-team
+
+# AI
+/ai/ @your-org/ai-team
+
+# Infrastructure
+/infra/ @your-org/infra-team
