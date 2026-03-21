@@ -134,6 +134,54 @@ async def gemini_generate(contents: list, system_prompt: str) -> tuple[str, int]
     logger.error(f"Gemini generate error {resp.status_code}: {resp.text[:400]}")
     raise HTTPException(status_code=502, detail=f"LLM error: {resp.status_code}")
 
+# ── Intent detection ─────────────────────────────────────────────────────────
+PRODUCT_INTENT_KEYWORDS = [
+    # Direct product requests
+    "buy", "purchase", "find", "show", "recommend", "suggest", "need", "want",
+    "looking for", "best", "cheap", "affordable", "price", "cost", "how much",
+    "do you have", "do you sell", "in stock", "available",
+    # Product-related questions
+    "difference between", "compare", "vs", "versus", "which one", "what type",
+    "brand", "model", "size", "weight", "color", "compatible", "fit", "work with",
+    # Home improvement tasks
+    "install", "fix", "repair", "replace", "build", "paint", "drill", "cut",
+    "project", "renovation", "upgrade",
+]
+
+# Non-product conversational phrases
+CONVERSATIONAL_PHRASES = [
+    "hello", "hi", "hey", "thanks", "thank you", "bye", "goodbye",
+    "how are you", "what are you", "who are you", "what can you do",
+    "help me", "good morning", "good afternoon", "good evening",
+    "ok", "okay", "great", "awesome", "cool", "nice", "perfect",
+    "yes", "no", "sure", "alright",
+]
+
+def is_product_query(query: str) -> bool:
+    """Return True if the query is likely asking about products."""
+    query_lower = query.lower().strip()
+
+    # Short conversational messages — no RAG needed
+    if len(query_lower.split()) <= 3:
+        if any(phrase in query_lower for phrase in CONVERSATIONAL_PHRASES):
+            return False
+
+    # Explicit product intent keywords
+    if any(kw in query_lower for kw in PRODUCT_INTENT_KEYWORDS):
+        return True
+
+    # Category keywords are a strong signal
+    if detect_category(query) is not None:
+        return True
+
+    # Queries with question words about items/things are product queries
+    product_question_patterns = ["what is", "what are", "which", "how do i", "how to", "can i use"]
+    if any(p in query_lower for p in product_question_patterns):
+        return True
+
+    # Default: run RAG for anything ambiguous longer than 4 words
+    return len(query_lower.split()) > 4
+
 # ── Category detection ────────────────────────────────────────────────────────
 def detect_category(query: str) -> str | None:
     """Return the best-matching category name based on keywords in the query."""
@@ -392,7 +440,10 @@ async def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     message_id = str(uuid.uuid4())
 
-    context, sources = await get_relevant_context(request.message)
+    if is_product_query(request.message):
+        context, sources = await get_relevant_context(request.message)
+    else:
+        context, sources = "", []
     response_text, latency_ms = await generate_response(request.message, request.history or [], context)
     is_unanswered = detect_unanswered(response_text, len(sources), request.history or [])
 
