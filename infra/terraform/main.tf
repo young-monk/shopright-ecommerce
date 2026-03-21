@@ -87,10 +87,6 @@ resource "google_sql_database_instance" "postgres" {
       ipv4_enabled    = false
       private_network = google_compute_network.vpc.id
     }
-    database_flags {
-      name  = "cloudsql.enable_pgvector"
-      value = "on"
-    }
     backup_configuration {
       enabled                        = true
       point_in_time_recovery_enabled = true
