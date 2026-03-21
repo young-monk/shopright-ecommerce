@@ -476,3 +476,10 @@ resource "google_project_iam_member" "compute_secret_accessor" {
   role    = "roles/secretmanager.secretAccessor"
   member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
 }
+
+# Grant Cloud Run default SA access to connect to Cloud SQL
+resource "google_project_iam_member" "compute_cloudsql_client" {
+  project = var.project_id
+  role    = "roles/cloudsql.client"
+  member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+}
