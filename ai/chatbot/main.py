@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ── Config ──────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "")
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-flash")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-2.5-pro")
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://shopright:shopright_dev@localhost:5432/shopright")
 BQ_DATASET = os.getenv("BIGQUERY_DATASET", "chat_analytics")
@@ -43,6 +43,22 @@ UNCERTAINTY_PHRASES = [
     "not available in", "no information", "outside my knowledge",
     "can't help with that", "unable to find", "not in our catalog",
 ]
+
+# Category keyword mapping for pre-filtering
+CATEGORY_KEYWORDS: dict[str, list[str]] = {
+    "Power Tools": ["drill", "saw", "grinder", "sander", "router", "jigsaw", "circular saw", "impact driver", "nail gun", "heat gun", "power tool"],
+    "Hand Tools": ["hammer", "screwdriver", "wrench", "pliers", "chisel", "hand tool", "tape measure", "level", "utility knife"],
+    "Lawn & Garden": ["lawn", "mower", "garden", "grass", "trimmer", "edger", "fertilizer", "soil", "mulch", "seed", "weed", "sprinkler", "hose", "rake", "shovel"],
+    "Outdoor Power Equipment": ["chainsaw", "leaf blower", "pressure washer", "snow blower", "generator", "outdoor power"],
+    "Plumbing": ["pipe", "faucet", "toilet", "sink", "drain", "valve", "fitting", "plumbing", "water heater"],
+    "Electrical": ["wire", "cable", "outlet", "switch", "breaker", "circuit", "electrical", "conduit", "panel"],
+    "Flooring": ["floor", "tile", "hardwood", "laminate", "vinyl", "carpet", "grout", "underlayment"],
+    "Paint": ["paint", "primer", "stain", "brush", "roller", "spray", "coating", "varnish"],
+    "Hardware": ["bolt", "screw", "nut", "anchor", "hinge", "lock", "latch", "fastener", "hardware"],
+    "Safety": ["safety", "glove", "helmet", "goggle", "respirator", "harness", "protective"],
+    "Storage": ["shelf", "cabinet", "rack", "storage", "organizer", "bin", "drawer"],
+    "HVAC": ["hvac", "air conditioner", "heater", "furnace", "duct", "vent", "thermostat", "filter"],
+}
 
 app = FastAPI(title="ShopRight Chatbot", version="1.0.0")
 
@@ -100,7 +116,7 @@ async def gemini_generate(contents: list, system_prompt: str) -> tuple[str, int]
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
     }
     t0 = time.monotonic()
     async with httpx.AsyncClient(timeout=30) as client:
@@ -113,23 +129,105 @@ async def gemini_generate(contents: list, system_prompt: str) -> tuple[str, int]
     logger.error(f"Gemini generate error {resp.status_code}: {resp.text[:400]}")
     raise HTTPException(status_code=502, detail=f"LLM error: {resp.status_code}")
 
-# ── RAG: Vector Search ────────────────────────────────────────────────────────
+# ── Category detection ────────────────────────────────────────────────────────
+def detect_category(query: str) -> str | None:
+    """Return the best-matching category name based on keywords in the query."""
+    query_lower = query.lower()
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        if any(kw in query_lower for kw in keywords):
+            return category
+    return None
+
+# ── RAG: Hybrid Vector + Keyword Search ───────────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[str]]:
     vector = await gemini_embed(query)
     if not vector:
         return "", []
+
+    detected_category = detect_category(query)
+    # Extract keywords (words ≥4 chars, excluding stop words) for hybrid matching
+    stop_words = {"what", "which", "that", "this", "with", "have", "from", "your", "best", "good", "need", "want", "some", "for", "can", "how", "does", "show", "find", "give", "tell", "about", "under", "over"}
+    keywords = [w for w in query.lower().split() if len(w) >= 4 and w not in stop_words]
+
     try:
         conn = await asyncpg.connect(DATABASE_URL)
-        rows = await conn.fetch(
-            """
-            SELECT name, description, category, brand, price, specifications
-            FROM product_embeddings
-            ORDER BY embedding <=> $1::vector
-            LIMIT $2
-            """,
-            str(vector),
-            top_k,
-        )
+
+        # Build hybrid query: vector similarity + optional keyword boost + optional category filter
+        if detected_category and keywords:
+            keyword_pattern = "%(" + "|".join(keywords) + ")%"
+            rows = await conn.fetch(
+                """
+                SELECT name, description, category, brand, price, specifications,
+                       (embedding <=> $1::vector) AS vec_dist,
+                       CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
+                FROM product_embeddings
+                WHERE category ILIKE $4
+                ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
+                LIMIT $2
+                """,
+                str(vector), top_k, keyword_pattern, f"%{detected_category}%",
+            )
+            # Fall back to full catalog if category filter yields nothing
+            if not rows:
+                rows = await conn.fetch(
+                    """
+                    SELECT name, description, category, brand, price, specifications,
+                           (embedding <=> $1::vector) AS vec_dist,
+                           CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
+                    FROM product_embeddings
+                    ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
+                    LIMIT $2
+                    """,
+                    str(vector), top_k, keyword_pattern,
+                )
+        elif detected_category:
+            rows = await conn.fetch(
+                """
+                SELECT name, description, category, brand, price, specifications,
+                       (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
+                FROM product_embeddings
+                WHERE category ILIKE $3
+                ORDER BY embedding <=> $1::vector
+                LIMIT $2
+                """,
+                str(vector), top_k, f"%{detected_category}%",
+            )
+            if not rows:
+                rows = await conn.fetch(
+                    """
+                    SELECT name, description, category, brand, price, specifications,
+                           (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
+                    FROM product_embeddings
+                    ORDER BY embedding <=> $1::vector
+                    LIMIT $2
+                    """,
+                    str(vector), top_k,
+                )
+        elif keywords:
+            keyword_pattern = "%(" + "|".join(keywords) + ")%"
+            rows = await conn.fetch(
+                """
+                SELECT name, description, category, brand, price, specifications,
+                       (embedding <=> $1::vector) AS vec_dist,
+                       CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
+                FROM product_embeddings
+                ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
+                LIMIT $2
+                """,
+                str(vector), top_k, keyword_pattern,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT name, description, category, brand, price, specifications,
+                       (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
+                FROM product_embeddings
+                ORDER BY embedding <=> $1::vector
+                LIMIT $2
+                """,
+                str(vector), top_k,
+            )
+
         await conn.close()
 
         if not rows:
@@ -174,17 +272,31 @@ def detect_unanswered(response: str, sources_count: int, history: List[ChatMessa
     return False
 
 # ── LLM Response ─────────────────────────────────────────────────────────────
-SYSTEM_PROMPT = """You are ShopRight's helpful AI assistant for a home improvement store.
-You help customers:
-- Find the right products for their projects
-- Understand product specifications and compatibility
-- Get advice on home improvement projects
-- Compare products and brands
-- Understand installation and usage
+SYSTEM_PROMPT = """You are ShopRight's expert AI assistant for a home improvement store. You are knowledgeable, precise, and safety-conscious.
 
-When you have product context from the store catalog, use it to give specific recommendations.
-Always be helpful, accurate, and safety-conscious. If unsure, say so and suggest consulting a professional.
-Keep responses concise but complete. Format lists clearly when helpful."""
+## Your role
+Help customers find the right products for their projects, understand specifications, compare options, and get practical advice on home improvement tasks.
+
+## How to answer product questions
+When product catalog context is provided:
+1. Recommend the MOST RELEVANT product(s) from the catalog — match the customer's stated need precisely.
+2. Always include the product name, brand, and exact price (e.g. "The DeWalt 20V MAX Drill at $129.99").
+3. If multiple options exist, compare them on the most relevant dimensions (power, price, weight, battery).
+4. Mention compatibility or safety considerations when relevant (e.g. "requires a 20V MAX battery, sold separately").
+
+## Pricing guidance
+- Always show prices when available.
+- If asked for budget options, prioritize the lowest-priced items that meet the requirement.
+- If asked for professional/heavy-duty options, prioritize power and durability over price.
+
+## When you cannot find a matching product
+Say clearly: "I couldn't find an exact match in our current catalog for [item]. You may want to check our website directly or ask a store associate." Do NOT fabricate product names or prices.
+
+## Tone and format
+- Be concise but complete. Avoid filler phrases.
+- Use bullet points for comparisons or feature lists.
+- For safety-critical tasks (electrical, structural, gas), always recommend consulting a licensed professional.
+- Keep responses under 300 words unless the customer asks for detailed instructions."""
 
 async def generate_response(message: str, history: List[ChatMessage], context: str) -> tuple[str, int]:
     contents = []
@@ -314,7 +426,14 @@ async def ingest_products():
 
     ingested = 0
     for product in products:
-        text = f"{product['name']} {product['description']} {product['category']} {product['brand']}"
+        specs = product['specifications'] or ""
+        text = (
+            f"Category: {product['category']}. "
+            f"Product type: {product['name']}. "
+            f"Brand: {product['brand']}. "
+            f"{product['description']}. "
+            f"Key features: {specs}"
+        ).strip()
         vector = await gemini_embed(text, task_type="RETRIEVAL_DOCUMENT")
         if vector is None:
             logger.error(f"Embed failed for {product['name']}")
