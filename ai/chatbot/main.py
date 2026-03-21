@@ -1,7 +1,7 @@
 """
 ShopRight AI Chatbot Service
-- Uses Vertex AI Gemini 1.5 Pro as LLM
-- Uses pgvector for RAG (product catalog + FAQs embedded with text-embedding-004)
+- Uses Google Gemini REST API directly
+- Uses pgvector for RAG (product catalog embedded with text-embedding-004)
 - Logs all conversations to BigQuery for analytics
 """
 
@@ -15,11 +15,8 @@ import json
 import logging
 from datetime import datetime, timezone
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, Part, Content
-from vertexai.language_models import TextEmbeddingModel
+import httpx
 from google.cloud import bigquery
-
 import asyncpg
 import asyncio
 
@@ -27,17 +24,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────────────
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "")
-VERTEX_LOCATION = os.getenv("VERTEX_AI_LOCATION", "us-central1")
-LLM_MODEL = os.getenv("LLM_MODEL", "gemini-1.5-pro")
+LLM_MODEL = os.getenv("LLM_MODEL", "gemini-1.5-flash")
 EMBED_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-004")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://shopright:shopright_dev@localhost:5432/shopright")
 BQ_DATASET = os.getenv("BIGQUERY_DATASET", "chat_analytics")
 BQ_TABLE = os.getenv("BIGQUERY_TABLE", "chat_logs")
 
-# ── Startup ──────────────────────────────────────────────────────────────────
-if GCP_PROJECT:
-    vertexai.init(project=GCP_PROJECT, location=VERTEX_LOCATION)
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 app = FastAPI(title="ShopRight Chatbot", version="1.0.0")
 
@@ -45,7 +40,7 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
-# ── Models ────────────────────────────────────────────────────────────────────
+# ── Request/Response Models ───────────────────────────────────────────────────
 class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"
     content: str
@@ -61,17 +56,47 @@ class ChatResponse(BaseModel):
     sources: List[str] = []
     message_id: str
 
+# ── Gemini REST helpers ───────────────────────────────────────────────────────
+async def gemini_embed(text: str) -> list[float] | None:
+    if not GEMINI_API_KEY:
+        return None
+    url = f"{GEMINI_BASE}/models/{EMBED_MODEL}:embedContent?key={GEMINI_API_KEY}"
+    payload = {
+        "model": f"models/{EMBED_MODEL}",
+        "content": {"parts": [{"text": text}]},
+        "taskType": "RETRIEVAL_QUERY",
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(url, json=payload)
+        if resp.status_code == 200:
+            return resp.json()["embedding"]["values"]
+        logger.warning(f"Embed error {resp.status_code}: {resp.text[:200]}")
+        return None
+
+async def gemini_generate(contents: list, system_prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        return "[Chatbot not configured] Please set GEMINI_API_KEY."
+    url = f"{GEMINI_BASE}/models/{LLM_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": contents,
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+    }
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(url, json=payload)
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"]
+        logger.error(f"Gemini generate error {resp.status_code}: {resp.text[:400]}")
+        raise HTTPException(status_code=502, detail=f"LLM error: {resp.status_code}")
+
 # ── RAG: Vector Search ────────────────────────────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[str]]:
-    """Embed query, find similar products/FAQs via pgvector, return context + source names."""
+    vector = await gemini_embed(query)
+    if not vector:
+        return "", []
     try:
-        embed_model = TextEmbeddingModel.from_pretrained(EMBED_MODEL)
-        embeddings = embed_model.get_embeddings([query])
-        query_vector = embeddings[0].values
-
         conn = await asyncpg.connect(DATABASE_URL)
-
-        # Search product embeddings
         rows = await conn.fetch(
             """
             SELECT name, description, category, brand, price, specifications
@@ -79,7 +104,7 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
             ORDER BY embedding <=> $1::vector
             LIMIT $2
             """,
-            str(query_vector),
+            str(vector),
             top_k,
         )
         await conn.close()
@@ -87,8 +112,7 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
         if not rows:
             return "", []
 
-        context_parts = []
-        sources = []
+        context_parts, sources = [], []
         for row in rows:
             context_parts.append(
                 f"Product: {row['name']}\n"
@@ -101,7 +125,7 @@ async def get_relevant_context(query: str, top_k: int = 5) -> tuple[str, list[st
         return "\n---\n".join(context_parts), sources
 
     except Exception as e:
-        logger.warning(f"RAG retrieval failed (using LLM without context): {e}")
+        logger.warning(f"RAG retrieval failed: {e}")
         return "", []
 
 
@@ -119,57 +143,43 @@ Always be helpful, accurate, and safety-conscious. If unsure, say so and suggest
 Keep responses concise but complete. Format lists clearly when helpful."""
 
 async def generate_response(message: str, history: List[ChatMessage], context: str) -> str:
-    """Generate LLM response using Vertex AI Gemini."""
-    if not GCP_PROJECT:
-        # Fallback for local dev without GCP
-        return f"[Dev mode - GCP not configured] I received your message: '{message}'. In production, I would search our product catalog and provide relevant recommendations."
-
-    model = GenerativeModel(LLM_MODEL, system_instruction=SYSTEM_PROMPT)
-
-    # Build conversation history
     contents = []
-    for msg in history[-6:]:  # Last 6 messages for context window
+    for msg in history[-6:]:
         role = "user" if msg.role == "user" else "model"
-        contents.append(Content(role=role, parts=[Part.from_text(msg.content)]))
+        contents.append({"role": role, "parts": [{"text": msg.content}]})
 
-    # Add current message with RAG context
     user_message = message
     if context:
-        user_message = f"""Relevant products from our catalog:
-{context}
+        user_message = (
+            f"Relevant products from our catalog:\n{context}\n\n"
+            f"Customer question: {message}\n\n"
+            f"Please answer using the product information above where relevant."
+        )
+    contents.append({"role": "user", "parts": [{"text": user_message}]})
 
-Customer question: {message}
-
-Please answer using the product information above where relevant."""
-
-    contents.append(Content(role="user", parts=[Part.from_text(user_message)]))
-
-    response = model.generate_content(contents)
-    return response.text
+    return await gemini_generate(contents, SYSTEM_PROMPT)
 
 
 # ── BigQuery Logging ──────────────────────────────────────────────────────────
-async def log_to_bigquery(session_id: str, message_id: str, user_message: str, assistant_response: str, sources: list[str]):
-    """Log chat interaction to BigQuery for analytics."""
+async def log_to_bigquery(session_id, message_id, user_message, assistant_response, sources):
     if not GCP_PROJECT:
         return
     try:
-        client = bigquery.Client(project=GCP_PROJECT)
-        table_id = f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}"
-
-        rows = [{
-            "session_id": session_id,
-            "message_id": message_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "user_message": user_message,
-            "assistant_response": assistant_response,
-            "sources_used": json.dumps(sources),
-            "message_length": len(user_message),
-            "response_length": len(assistant_response),
-            "sources_count": len(sources),
-        }]
-
-        errors = client.insert_rows_json(table_id, rows)
+        bq = bigquery.Client(project=GCP_PROJECT)
+        errors = bq.insert_rows_json(
+            f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}",
+            [{
+                "session_id": session_id,
+                "message_id": message_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "user_message": user_message,
+                "assistant_response": assistant_response,
+                "sources_used": json.dumps(sources),
+                "message_length": len(user_message),
+                "response_length": len(assistant_response),
+                "sources_count": len(sources),
+            }],
+        )
         if errors:
             logger.error(f"BigQuery insert errors: {errors}")
     except Exception as e:
@@ -186,13 +196,9 @@ async def chat(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     message_id = str(uuid.uuid4())
 
-    # RAG: Get relevant product context
     context, sources = await get_relevant_context(request.message)
-
-    # Generate LLM response
     response_text = await generate_response(request.message, request.history or [], context)
 
-    # Async log to BigQuery (don't await - fire and forget)
     asyncio.create_task(
         log_to_bigquery(session_id, message_id, request.message, response_text, sources)
     )
@@ -207,20 +213,29 @@ async def chat(request: ChatRequest):
 @app.post("/embeddings/ingest")
 async def ingest_products():
     """Ingest product catalog into vector store for RAG."""
-    if not GCP_PROJECT:
-        return {"message": "GCP not configured, skipping ingestion"}
+    if not GEMINI_API_KEY:
+        return {"message": "GEMINI_API_KEY not configured, skipping ingestion"}
 
     conn = await asyncpg.connect(DATABASE_URL)
-    embed_model = TextEmbeddingModel.from_pretrained(EMBED_MODEL)
-
-    # Fetch all products
-    products = await conn.fetch("SELECT id, name, description, category, brand, price, specifications FROM products")
+    products = await conn.fetch(
+        "SELECT id, name, description, category, brand, price, specifications FROM products"
+    )
 
     ingested = 0
     for product in products:
         text = f"{product['name']} {product['description']} {product['category']} {product['brand']}"
-        embeddings = embed_model.get_embeddings([text])
-        vector = embeddings[0].values
+        url = f"{GEMINI_BASE}/models/{EMBED_MODEL}:embedContent?key={GEMINI_API_KEY}"
+        payload = {
+            "model": f"models/{EMBED_MODEL}",
+            "content": {"parts": [{"text": text}]},
+            "taskType": "RETRIEVAL_DOCUMENT",
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code != 200:
+                logger.error(f"Embed failed for {product['name']}: {resp.text[:200]}")
+                continue
+            vector = resp.json()["embedding"]["values"]
 
         await conn.execute(
             """
