@@ -52,11 +52,19 @@ resource "google_compute_subnetwork" "subnet" {
   network       = google_compute_network.vpc.id
 }
 
+# VPC connectors require a dedicated /28 subnet
+resource "google_compute_subnetwork" "connector_subnet" {
+  name          = "shopright-connector-subnet"
+  ip_cidr_range = "10.8.0.0/28"
+  region        = var.region
+  network       = google_compute_network.vpc.id
+}
+
 resource "google_vpc_access_connector" "connector" {
   name   = "shopright-connector"
   region = var.region
   subnet {
-    name = google_compute_subnetwork.subnet.name
+    name = google_compute_subnetwork.connector_subnet.name
   }
   machine_type = "f1-micro"
 }
