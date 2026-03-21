@@ -1,7 +1,9 @@
 'use client'
 import { useState, useRef, useEffect } from 'react'
-import { MessageSquare, X, Send, Loader2 } from 'lucide-react'
+import { MessageSquare, X, Send, Loader2, ThumbsUp, ThumbsDown } from 'lucide-react'
 import axios from 'axios'
+
+const CHATBOT_URL = process.env.NEXT_PUBLIC_CHATBOT_URL || 'http://localhost:8004'
 
 interface Message {
   id: string
@@ -9,6 +11,9 @@ interface Message {
   content: string
   sources?: string[]
   timestamp: Date
+  isUnanswered?: boolean
+  rating?: 1 | -1
+  userMessage?: string
 }
 
 export function ChatbotWidget() {
@@ -33,10 +38,11 @@ export function ChatbotWidget() {
   const sendMessage = async () => {
     if (!input.trim() || isLoading) return
 
+    const userText = input
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
-      content: input,
+      content: userText,
       timestamp: new Date(),
     }
     setMessages(prev => [...prev, userMessage])
@@ -44,24 +50,23 @@ export function ChatbotWidget() {
     setIsLoading(true)
 
     try {
-      const response = await axios.post(
-        `${process.env.NEXT_PUBLIC_CHATBOT_URL || 'http://localhost:8004'}/chat`,
-        {
-          message: input,
-          session_id: sessionId,
-          history: messages.slice(-6).map(m => ({ role: m.role, content: m.content })),
-        }
-      )
+      const response = await axios.post(`${CHATBOT_URL}/chat`, {
+        message: userText,
+        session_id: sessionId,
+        history: messages.slice(-6).map(m => ({ role: m.role, content: m.content })),
+      })
 
       const assistantMessage: Message = {
-        id: crypto.randomUUID(),
+        id: response.data.message_id,
         role: 'assistant',
         content: response.data.response,
         sources: response.data.sources,
         timestamp: new Date(),
+        isUnanswered: response.data.is_unanswered,
+        userMessage: userText,
       }
       setMessages(prev => [...prev, assistantMessage])
-    } catch (error) {
+    } catch {
       setMessages(prev => [
         ...prev,
         {
@@ -73,6 +78,23 @@ export function ChatbotWidget() {
       ])
     } finally {
       setIsLoading(false)
+    }
+  }
+
+  const submitRating = async (msg: Message, rating: 1 | -1) => {
+    setMessages(prev =>
+      prev.map(m => (m.id === msg.id ? { ...m, rating } : m))
+    )
+    try {
+      await axios.post(`${CHATBOT_URL}/feedback`, {
+        message_id: msg.id,
+        session_id: sessionId,
+        rating,
+        user_message: msg.userMessage || '',
+        assistant_response: msg.content,
+      })
+    } catch {
+      // non-critical
     }
   }
 
@@ -104,20 +126,53 @@ export function ChatbotWidget() {
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.map(msg => (
               <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                <div
-                  className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
-                    msg.role === 'user'
-                      ? 'bg-primary text-white'
-                      : 'bg-gray-100 text-gray-800'
-                  }`}
-                >
-                  <p>{msg.content}</p>
-                  {msg.sources && msg.sources.length > 0 && (
-                    <div className="mt-2 pt-2 border-t border-gray-300">
-                      <p className="text-xs text-gray-500 font-medium">Sources:</p>
-                      {msg.sources.map((source, i) => (
-                        <p key={i} className="text-xs text-gray-500">{source}</p>
-                      ))}
+                <div className="max-w-[80%] space-y-1">
+                  <div
+                    className={`rounded-lg px-3 py-2 text-sm ${
+                      msg.role === 'user'
+                        ? 'bg-primary text-white'
+                        : msg.isUnanswered
+                        ? 'bg-amber-50 text-gray-800 border border-amber-200'
+                        : 'bg-gray-100 text-gray-800'
+                    }`}
+                  >
+                    <p>{msg.content}</p>
+                    {msg.isUnanswered && (
+                      <p className="text-xs text-amber-600 mt-1">
+                        ⚠ Couldn't find a match in our catalog
+                      </p>
+                    )}
+                    {msg.sources && msg.sources.length > 0 && (
+                      <div className="mt-2 pt-2 border-t border-gray-300">
+                        <p className="text-xs text-gray-500 font-medium">Sources:</p>
+                        {msg.sources.map((source, i) => (
+                          <p key={i} className="text-xs text-gray-500">{source}</p>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Rating buttons — only on assistant messages (not the greeting) */}
+                  {msg.role === 'assistant' && msg.id !== '0' && (
+                    <div className="flex gap-1 pl-1">
+                      <button
+                        onClick={() => submitRating(msg, 1)}
+                        className={`p-1 rounded transition-colors ${
+                          msg.rating === 1 ? 'text-green-600' : 'text-gray-400 hover:text-green-600'
+                        }`}
+                        title="Helpful"
+                      >
+                        <ThumbsUp size={13} />
+                      </button>
+                      <button
+                        onClick={() => submitRating(msg, -1)}
+                        className={`p-1 rounded transition-colors ${
+                          msg.rating === -1 ? 'text-red-500' : 'text-gray-400 hover:text-red-500'
+                        }`}
+                        title="Not helpful"
+                      >
+                        <ThumbsDown size={13} />
+                      </button>
                     </div>
                   )}
                 </div>

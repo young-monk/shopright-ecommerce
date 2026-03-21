@@ -408,6 +408,27 @@ resource "google_bigquery_table" "chat_logs" {
     { name = "message_length",     type = "INTEGER",   mode = "NULLABLE" },
     { name = "response_length",    type = "INTEGER",   mode = "NULLABLE" },
     { name = "sources_count",      type = "INTEGER",   mode = "NULLABLE" },
+    { name = "latency_ms",         type = "INTEGER",   mode = "NULLABLE" },
+    { name = "is_unanswered",      type = "BOOLEAN",   mode = "NULLABLE" },
+  ])
+
+  time_partitioning {
+    type  = "DAY"
+    field = "timestamp"
+  }
+}
+
+resource "google_bigquery_table" "feedback" {
+  dataset_id = google_bigquery_dataset.chat_analytics.dataset_id
+  table_id   = "feedback"
+
+  schema = jsonencode([
+    { name = "message_id",         type = "STRING",    mode = "REQUIRED" },
+    { name = "session_id",         type = "STRING",    mode = "REQUIRED" },
+    { name = "timestamp",          type = "TIMESTAMP", mode = "REQUIRED" },
+    { name = "rating",             type = "INTEGER",   mode = "REQUIRED" },
+    { name = "user_message",       type = "STRING",    mode = "NULLABLE" },
+    { name = "assistant_response", type = "STRING",    mode = "NULLABLE" },
   ])
 
   time_partitioning {
