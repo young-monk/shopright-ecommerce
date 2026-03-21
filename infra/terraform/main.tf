@@ -222,9 +222,18 @@ resource "google_cloud_run_v2_service" "chatbot" {
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/chatbot:latest"
       ports { container_port = 8004 }
-      env { name = "GCP_PROJECT_ID"; value = var.project_id }
-      env { name = "VERTEX_AI_LOCATION"; value = var.region }
-      env { name = "BIGQUERY_DATASET"; value = "chat_analytics" }
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      env {
+        name  = "VERTEX_AI_LOCATION"
+        value = var.region
+      }
+      env {
+        name  = "BIGQUERY_DATASET"
+        value = "chat_analytics"
+      }
       env {
         name  = "DATABASE_URL"
         value = "postgresql://shopright:${var.db_password}@/shopright?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
@@ -253,8 +262,14 @@ resource "google_cloud_run_v2_service" "frontend" {
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/frontend:latest"
       ports { container_port = 3000 }
-      env { name = "NEXT_PUBLIC_API_URL";     value = google_cloud_run_v2_service.api_gateway.uri }
-      env { name = "NEXT_PUBLIC_CHATBOT_URL"; value = google_cloud_run_v2_service.chatbot.uri }
+      env {
+        name  = "NEXT_PUBLIC_API_URL"
+        value = google_cloud_run_v2_service.api_gateway.uri
+      }
+      env {
+        name  = "NEXT_PUBLIC_CHATBOT_URL"
+        value = google_cloud_run_v2_service.chatbot.uri
+      }
       resources {
         limits = { cpu = "1", memory = "1Gi" }
       }
@@ -279,9 +294,18 @@ resource "google_cloud_run_v2_service" "api_gateway" {
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/api-gateway:latest"
       ports { container_port = 8000 }
-      env { name = "PRODUCT_SERVICE_URL"; value = google_cloud_run_v2_service.product_service.uri }
-      env { name = "ORDER_SERVICE_URL";   value = google_cloud_run_v2_service.order_service.uri }
-      env { name = "USER_SERVICE_URL";    value = google_cloud_run_v2_service.user_service.uri }
+      env {
+        name  = "PRODUCT_SERVICE_URL"
+        value = google_cloud_run_v2_service.product_service.uri
+      }
+      env {
+        name  = "ORDER_SERVICE_URL"
+        value = google_cloud_run_v2_service.order_service.uri
+      }
+      env {
+        name  = "USER_SERVICE_URL"
+        value = google_cloud_run_v2_service.user_service.uri
+      }
       resources {
         limits = { cpu = "1", memory = "512Mi" }
       }
