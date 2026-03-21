@@ -29,15 +29,15 @@ async def health():
 
 @app.api_route("/products{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_products(path: str, request: Request):
-    return await proxy(f"{SERVICES['products']}{path}", request)
+    return await proxy(f"{SERVICES['products']}/products{path}", request)
 
 @app.api_route("/orders{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_orders(path: str, request: Request):
-    return await proxy(f"{SERVICES['orders']}{path}", request)
+    return await proxy(f"{SERVICES['orders']}/orders{path}", request)
 
 @app.api_route("/users{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy_users(path: str, request: Request):
-    return await proxy(f"{SERVICES['users']}{path}", request)
+    return await proxy(f"{SERVICES['users']}/users{path}", request)
 
 async def proxy(url: str, request: Request):
     body = await request.body()

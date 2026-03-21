@@ -1,17 +1,43 @@
 'use client'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
+import { useSearchParams } from 'next/navigation'
 import { Navbar } from '@/components/layout/Navbar'
 import { ProductCard } from '@/components/products/ProductCard'
 import { ProductFilters } from '@/components/products/ProductFilters'
 import { api } from '@/lib/api'
 
+interface Filters {
+  category: string
+  minPrice: number
+  maxPrice: number
+  search: string
+}
+
 export default function ProductsPage() {
-  const [filters, setFilters] = useState({ category: '', minPrice: 0, maxPrice: 10000, search: '' })
+  const searchParams = useSearchParams()
+  const [filters, setFilters] = useState<Filters>({
+    category: searchParams.get('category') ?? '',
+    minPrice: 0,
+    maxPrice: 10000,
+    search: searchParams.get('search') ?? '',
+  })
+
+  // Sync filters when URL params change (e.g. clicking a category card)
+  useEffect(() => {
+    setFilters((f: Filters) => ({
+      ...f,
+      category: searchParams.get('category') ?? '',
+      search: searchParams.get('search') ?? '',
+    }))
+  }, [searchParams])
 
   const { data, isLoading } = useQuery({
     queryKey: ['products', filters],
-    queryFn: () => api.get('/products', { params: filters }).then(r => r.data),
+    queryFn: async () => {
+      const res = await api.get('/products', { params: filters })
+      return res.data
+    },
   })
 
   return (

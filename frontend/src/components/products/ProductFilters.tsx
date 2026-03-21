@@ -7,7 +7,11 @@ interface Filters {
   search: string
 }
 
-const CATEGORIES = ['Tools', 'Building Materials', 'Electrical', 'Plumbing', 'Paint', 'Flooring', 'Outdoor']
+const CATEGORIES = [
+  'Power Tools', 'Hand Tools', 'Building Materials', 'Electrical',
+  'Plumbing', 'Paint & Supplies', 'Flooring', 'Outdoor & Garden',
+  'Storage & Organization', 'Safety & Security', 'Heating & Cooling',
+]
 
 export function ProductFilters({ filters, onChange }: { filters: Filters; onChange: (f: Filters) => void }) {
   return (

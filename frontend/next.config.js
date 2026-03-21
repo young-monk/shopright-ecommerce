@@ -2,7 +2,11 @@
 const nextConfig = {
   output: 'standalone',
   images: {
-    domains: ['storage.googleapis.com', 'placehold.co'],
+    remotePatterns: [
+      { protocol: 'https', hostname: 'storage.googleapis.com' },
+      { protocol: 'https', hostname: 'placehold.co' },
+      { protocol: 'https', hostname: 'picsum.photos' },
+    ],
   },
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
