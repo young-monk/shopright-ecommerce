@@ -222,9 +222,9 @@ resource "google_cloud_run_v2_service" "chatbot" {
     containers {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/chatbot:latest"
       ports { container_port = 8004 }
-      env { name = "GCP_PROJECT_ID";     value = var.project_id }
+      env { name = "GCP_PROJECT_ID"; value = var.project_id }
       env { name = "VERTEX_AI_LOCATION"; value = var.region }
-      env { name = "BIGQUERY_DATASET";   value = "chat_analytics" }
+      env { name = "BIGQUERY_DATASET"; value = "chat_analytics" }
       env {
         name  = "DATABASE_URL"
         value = "postgresql://shopright:${var.db_password}@/shopright?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
@@ -370,7 +370,9 @@ resource "google_project_iam_member" "chatbot_bigquery" {
 # ── Secret Manager ────────────────────────────────────────────────────────────
 resource "google_secret_manager_secret" "jwt_secret" {
   secret_id = "jwt-secret"
-  replication { auto {} }
+  replication {
+    auto {}
+  }
   depends_on = [google_project_service.apis]
 }
 
