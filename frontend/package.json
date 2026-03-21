@@ -6,7 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "eslint src --ext .ts,.tsx"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.0",
+    "eslint-config-next": "^15.0.0",
+    "@typescript-eslint/parser": "^7.0.0"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.40.0",
