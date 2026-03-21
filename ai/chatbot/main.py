@@ -157,9 +157,22 @@ CONVERSATIONAL_PHRASES = [
     "yes", "no", "sure", "alright",
 ]
 
+NON_PRODUCT_PATTERNS = [
+    # SQL / code
+    "select ", "insert ", "update ", "delete ", "drop ", "create table",
+    "from ", "where ", "join ", "group by", "order by",
+    "def ", "class ", "import ", "function ", "console.log", "print(",
+    # Gibberish signals
+    "* from", "SELECT *",
+]
+
 def is_product_query(query: str) -> bool:
     """Return True if the query is likely asking about products."""
     query_lower = query.lower().strip()
+
+    # Reject SQL, code, and gibberish immediately
+    if any(p.lower() in query_lower for p in NON_PRODUCT_PATTERNS):
+        return False
 
     # Short conversational messages — no RAG needed
     if len(query_lower.split()) <= 3:
@@ -344,6 +357,11 @@ When product catalog context is provided:
 
 ## When you cannot find a matching product
 Say clearly: "I couldn't find an exact match in our current catalog for [item]. You may want to check our website directly or ask a store associate." Do NOT fabricate product names or prices.
+
+## Off-topic or nonsensical input
+If the message is not related to home improvement, products, or shopping (e.g. SQL queries, code, random text, questions about unrelated topics), respond with:
+"I'm here to help you find home improvement products and answer DIY questions. Could you tell me what you're working on or looking for?"
+Never attempt to answer SQL queries, write code, or respond to gibberish with product listings.
 
 ## Tone and format
 - Be concise but complete. Avoid filler phrases.
