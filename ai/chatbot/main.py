@@ -75,14 +75,15 @@ class FeedbackRequest(BaseModel):
     assistant_response: Optional[str] = None
 
 # ── Gemini REST helpers ───────────────────────────────────────────────────────
-async def gemini_embed(text: str) -> list[float] | None:
+async def gemini_embed(text: str, task_type: str = "RETRIEVAL_QUERY") -> list[float] | None:
     if not GEMINI_API_KEY:
         return None
     url = f"{GEMINI_BASE}/models/{EMBED_MODEL}:embedContent?key={GEMINI_API_KEY}"
     payload = {
         "model": f"models/{EMBED_MODEL}",
         "content": {"parts": [{"text": text}]},
-        "taskType": "RETRIEVAL_QUERY",
+        "taskType": task_type,
+        "outputDimensionality": 768,
     }
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(url, json=payload)
@@ -314,18 +315,10 @@ async def ingest_products():
     ingested = 0
     for product in products:
         text = f"{product['name']} {product['description']} {product['category']} {product['brand']}"
-        url = f"{GEMINI_BASE}/models/{EMBED_MODEL}:embedContent?key={GEMINI_API_KEY}"
-        payload = {
-            "model": f"models/{EMBED_MODEL}",
-            "content": {"parts": [{"text": text}]},
-            "taskType": "RETRIEVAL_DOCUMENT",
-        }
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code != 200:
-                logger.error(f"Embed failed for {product['name']}: {resp.text[:200]}")
-                continue
-            vector = resp.json()["embedding"]["values"]
+        vector = await gemini_embed(text, task_type="RETRIEVAL_DOCUMENT")
+        if vector is None:
+            logger.error(f"Embed failed for {product['name']}")
+            continue
 
         await conn.execute(
             """
