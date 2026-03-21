@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS users (
 -- Orders table
 CREATE TABLE IF NOT EXISTS orders (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id UUID NOT NULL,
+    user_id TEXT NOT NULL,
     status VARCHAR(50) DEFAULT 'pending',
     items TEXT NOT NULL,  -- JSON
     subtotal DECIMAL(10,2),

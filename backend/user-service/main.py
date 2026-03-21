@@ -4,6 +4,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Boolean, DateTime, select
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timedelta
@@ -26,7 +27,7 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     full_name: Mapped[str] = mapped_column(String, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String, nullable=False)
@@ -97,8 +98,8 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     db.add(user)
     await db.commit()
     await db.refresh(user)
-    token = create_token(user.id, user.email)
-    return {"user_id": user.id, "email": user.email, "token": token}
+    token = create_token(str(user.id), user.email)
+    return {"user_id": str(user.id), "email": user.email, "token": token}
 
 @app.post("/users/login")
 async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
@@ -106,9 +107,9 @@ async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
     user = result.scalar_one_or_none()
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    token = create_token(user.id, user.email)
-    return {"user_id": user.id, "email": user.email, "full_name": user.full_name, "token": token}
+    token = create_token(str(user.id), user.email)
+    return {"user_id": str(user.id), "email": user.email, "full_name": user.full_name, "token": token}
 
 @app.get("/users/me")
 async def get_me(current_user: User = Depends(get_current_user)):
-    return {"id": current_user.id, "email": current_user.email, "full_name": current_user.full_name, "is_admin": current_user.is_admin}
+    return {"id": str(current_user.id), "email": current_user.email, "full_name": current_user.full_name, "is_admin": current_user.is_admin}

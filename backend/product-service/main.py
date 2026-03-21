@@ -3,8 +3,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Float, Integer, Boolean, Text, select, and_, func
-from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
+from pydantic import BaseModel, field_serializer
 from typing import Optional, List
+from uuid import UUID
 import os, uuid
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://shopright:shopright_dev@localhost:5432/shopright")
@@ -17,7 +19,7 @@ class Base(DeclarativeBase):
 
 class Product(Base):
     __tablename__ = "products"
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     sku: Mapped[str] = mapped_column(String, unique=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str] = mapped_column(Text)
@@ -46,7 +48,7 @@ class ProductCreate(BaseModel):
     specifications: Optional[str] = None
 
 class ProductResponse(BaseModel):
-    id: str
+    id: UUID | str
     sku: str
     name: str
     description: str
@@ -62,6 +64,10 @@ class ProductResponse(BaseModel):
     specifications: Optional[str]
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("id")
+    def serialize_id(self, v) -> str:
+        return str(v)
 
 app = FastAPI(title="Product Service", version="1.0.0")
 

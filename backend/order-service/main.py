@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Float, Integer, Text, JSON, DateTime, select, func
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
@@ -17,7 +18,7 @@ class Base(DeclarativeBase):
 
 class Order(Base):
     __tablename__ = "orders"
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, default="pending")  # pending, confirmed, shipped, delivered, cancelled
     items: Mapped[str] = mapped_column(Text)  # JSON list of {product_id, name, quantity, price}
@@ -87,7 +88,7 @@ async def create_order(data: OrderCreate, db: AsyncSession = Depends(get_db)):
     db.add(order)
     await db.commit()
     await db.refresh(order)
-    return {"id": order.id, "status": order.status, "total": order.total}
+    return {"id": str(order.id), "status": order.status, "total": order.total}
 
 @app.get("/orders/{order_id}")
 async def get_order(order_id: str, db: AsyncSession = Depends(get_db)):
