@@ -12,6 +12,9 @@ Run once (or whenever catalog/FAQs/reviews change):
   python ingest.py
 
 Requires: GEMINI_API_KEY and DATABASE_URL env vars.
+Multiple keys (for rotation when free-tier keys expire):
+  GEMINI_API_KEYS=key1,key2,key3 python ingest.py
+  GEMINI_API_KEY=key1 python ingest.py   # single key also works
 """
 
 import asyncio
@@ -29,38 +32,60 @@ import httpx
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-DATABASE_URL   = os.getenv("DATABASE_URL", "postgresql://shopright:shopright_dev@localhost:5432/shopright")
+# Support comma-separated list of keys for automatic rotation when one expires
+_raw_keys = os.getenv("GEMINI_API_KEYS") or os.getenv("GEMINI_API_KEY", "")
+_API_KEYS: list[str] = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+_key_idx  = 0  # current key index
+
+DATABASE_URL  = os.getenv("DATABASE_URL", "postgresql://shopright:shopright_dev@localhost:5432/shopright")
 
 _EMBED_MODEL  = "gemini-embedding-001"
 _GEMINI_BASE  = "https://generativelanguage.googleapis.com/v1beta"
-_BATCH_PAUSE  = 0.2   # seconds between embed API calls to avoid rate-limit
+_BATCH_PAUSE  = 0.2   # seconds between embed API calls
 
 DATA_DIR = Path(__file__).parent / "data"
+
+
+def _current_key() -> str:
+    return _API_KEYS[_key_idx] if _API_KEYS else ""
+
+def _rotate_key() -> bool:
+    """Advance to next key. Returns False if no more keys available."""
+    global _key_idx
+    if _key_idx + 1 < len(_API_KEYS):
+        _key_idx += 1
+        logger.warning(f"Key expired — rotating to key {_key_idx + 1}/{len(_API_KEYS)}")
+        return True
+    return False
 
 
 # ── Embedding ──────────────────────────────────────────────────────────────────
 
 async def embed_text(text: str, task_type: str = "RETRIEVAL_DOCUMENT") -> list[float]:
-    """Call Gemini embedding API, return 3072-dim vector."""
-    url = f"{_GEMINI_BASE}/models/{_EMBED_MODEL}:embedContent?key={GEMINI_API_KEY}"
+    """Call Gemini embedding API, return 3072-dim vector. Auto-rotates keys on expiry."""
     payload = {
         "model": f"models/{_EMBED_MODEL}",
         "content": {"parts": [{"text": text}]},
         "taskType": task_type,
     }
     async with httpx.AsyncClient(timeout=20) as client:
-        for attempt in range(3):
+        for attempt in range(len(_API_KEYS) * 2 + 3):
+            url = f"{_GEMINI_BASE}/models/{_EMBED_MODEL}:embedContent?key={_current_key()}"
             resp = await client.post(url, json=payload)
             if resp.status_code == 200:
                 return resp.json()["embedding"]["values"]
             if resp.status_code == 429:
-                wait = 2 ** attempt
+                wait = min(2 ** (attempt % 4), 16)
                 logger.warning(f"Rate limited — waiting {wait}s")
                 await asyncio.sleep(wait)
                 continue
+            # Key expired or invalid — try rotating
+            if resp.status_code in (400, 403) and "expired" in resp.text.lower():
+                if not _rotate_key():
+                    raise RuntimeError(f"All API keys exhausted. Last error: {resp.text[:200]}")
+                continue
             raise RuntimeError(f"Embed error {resp.status_code}: {resp.text[:200]}")
-    raise RuntimeError("Embed failed after 3 retries")
+    raise RuntimeError("Embed failed after all retries")
 
 
 # ── Products ───────────────────────────────────────────────────────────────────
@@ -69,9 +94,14 @@ async def ingest_products(conn: asyncpg.Connection) -> int:
     rows = await conn.fetch(
         "SELECT id, sku, name, description, category, brand, price, specifications FROM products ORDER BY sku"
     )
-    logger.info(f"Ingesting {len(rows)} products …")
-    count = 0
-    for row in rows:
+    # Fetch already-ingested product source_ids so we can skip them
+    done = {r["source_id"] for r in await conn.fetch(
+        "SELECT source_id FROM knowledge_embeddings WHERE doc_type = 'product'"
+    )}
+    remaining = [r for r in rows if str(r["id"]) not in done]
+    logger.info(f"Products: {len(rows)} total, {len(done)} already ingested, {len(remaining)} to embed …")
+    count = len(done)
+    for row in remaining:
         specs_raw = row["specifications"] or ""
         # Parse JSON specs into readable key: value pairs
         try:
@@ -119,10 +149,15 @@ async def ingest_products(conn: asyncpg.Connection) -> int:
 async def ingest_faqs(conn: asyncpg.Connection) -> int:
     faq_path = DATA_DIR / "faqs.json"
     faqs = json.loads(faq_path.read_text())
-    logger.info(f"Ingesting {len(faqs)} FAQs …")
-    count = 0
+    done = {r["source_id"] for r in await conn.fetch(
+        "SELECT source_id FROM knowledge_embeddings WHERE doc_type = 'faq'"
+    )}
+    logger.info(f"FAQs: {len(faqs)} total, {len(done)} already ingested …")
+    count = len(done)
     for i, faq in enumerate(faqs):
         source_id = f"faq-{i:04d}"
+        if source_id in done:
+            continue
         content = f"Q: {faq['question']}\nA: {faq['answer']}"
         metadata = {"category": faq.get("category", "General"), "source_id": source_id}
         vec = await embed_text(content)
@@ -153,14 +188,19 @@ async def ingest_reviews(conn: asyncpg.Connection) -> tuple[int, int]:
     """
     reviews_path = DATA_DIR / "reviews.json"
     all_entries = json.loads(reviews_path.read_text())
-    logger.info(f"Ingesting reviews for {len(all_entries)} products …")
 
     # Build sku → product_id map from DB
     product_rows = await conn.fetch("SELECT id, sku FROM products")
     sku_to_id = {r["sku"]: r["id"] for r in product_rows}
 
+    # Track already-ingested review summaries
+    done_summaries = {r["source_id"] for r in await conn.fetch(
+        "SELECT source_id FROM knowledge_embeddings WHERE doc_type = 'review_summary'"
+    )}
+    logger.info(f"Reviews: {len(all_entries)} products, {len(done_summaries)} summaries already ingested …")
+
     reviews_inserted = 0
-    summaries_upserted = 0
+    summaries_upserted = len(done_summaries)
 
     for entry in all_entries:
         sku = entry["sku"]
@@ -203,7 +243,7 @@ async def ingest_reviews(conn: asyncpg.Connection) -> tuple[int, int]:
                 logger.warning(f"  Review insert error for {sku}: {e}")
 
         # ── Build review summary for RAG ──────────────────────────────────────
-        if reviews:
+        if reviews and sku not in done_summaries:
             avg_stars = sum(r.get("stars", 3) for r in reviews) / len(reviews)
             sample = reviews[:5]  # top 5 reviews in summary
             summary_lines = [
@@ -245,8 +285,8 @@ async def ingest_reviews(conn: asyncpg.Connection) -> tuple[int, int]:
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 async def main():
-    if not GEMINI_API_KEY:
-        raise SystemExit("GEMINI_API_KEY is required")
+    if not _API_KEYS:
+        raise SystemExit("GEMINI_API_KEY (or GEMINI_API_KEYS) is required")
 
     t0 = time.monotonic()
     conn = await asyncpg.connect(DATABASE_URL)

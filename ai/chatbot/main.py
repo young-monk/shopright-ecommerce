@@ -201,15 +201,16 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             kw_regex = "|".join(re.escape(k) for k in keywords)
             keyword_bonus = f"CASE WHEN LOWER(content) ~ '{kw_regex}' THEN 0.15 ELSE 0 END"
 
-        # Query all three doc types — products get product chips, FAQs/reviews enrich context
+        # Query all three doc types — use halfvec cast to hit the HNSW index
+        # (pgvector's vector(3072) exceeds the 2000-dim ANN limit; halfvec lifts it to 16000)
         rows = await conn.fetch(
             f"""
             SELECT doc_type, source_id, content, metadata,
-                   (embedding <=> $1::vector) AS vec_dist,
+                   (embedding::halfvec(3072) <=> $1::halfvec(3072)) AS vec_dist,
                    {keyword_bonus} AS keyword_bonus
             FROM knowledge_embeddings
             WHERE 1=1 {cat_clause} {price_clause}
-            ORDER BY (embedding <=> $1::vector) - {keyword_bonus}
+            ORDER BY (embedding::halfvec(3072) <=> $1::halfvec(3072)) - {keyword_bonus}
             LIMIT $2
             """,
             str(vector), top_k,

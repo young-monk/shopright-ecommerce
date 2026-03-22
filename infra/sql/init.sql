@@ -37,11 +37,12 @@ CREATE TABLE IF NOT EXISTS knowledge_embeddings (
 CREATE UNIQUE INDEX IF NOT EXISTS knowledge_embeddings_source_unique
     ON knowledge_embeddings (doc_type, source_id);
 
--- IVFFlat for fast ANN search (~2000-3000 rows: lists=150 gives ~14 rows/list)
-CREATE INDEX IF NOT EXISTS knowledge_embeddings_ivfflat
+-- HNSW on halfvec cast: pgvector's vector(3072) exceeds the 2000-dim ANN limit,
+-- but casting to halfvec lifts it to 16000 dims. No data migration required.
+CREATE INDEX IF NOT EXISTS knowledge_embeddings_hnsw
     ON knowledge_embeddings
-    USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 150);
+    USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
 
 -- Product reviews (populated by ingest.py from reviews.json)
 CREATE TABLE IF NOT EXISTS product_reviews (
