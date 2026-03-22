@@ -57,9 +57,13 @@ _COST_PER_1M_OUT = 0.30
 # In-memory metrics ring buffer (last 1000 requests)
 _req_metrics: list[dict] = []
 
-# ContextVars — pass tool results from the ADK search_products tool back to the SSE generator
-_cv_sources: contextvars.ContextVar[list] = contextvars.ContextVar("sources", default=[])
-_cv_rag_meta: contextvars.ContextVar[dict] = contextvars.ContextVar("rag_meta", default={})
+# Pass tool results from ADK search_products back to the SSE generator.
+# ContextVar writes inside child tasks (how ADK calls tools) don't propagate back
+# to the parent task. Fix: use a module-level dict keyed by message_id; store the
+# ID in a ContextVar (reads are safe across task boundaries).
+_cv_message_id: contextvars.ContextVar[str] = contextvars.ContextVar("message_id", default="")
+_sources_store: dict[str, list] = {}
+_rag_meta_store: dict[str, dict] = {}
 
 # ── Session ending detection ──────────────────────────────────────────────────
 SESSION_END_PHRASES = [
@@ -307,9 +311,6 @@ When search results are available:
 4. Mention compatibility or safety considerations when relevant.
 5. Do NOT repeat products already recommended earlier in this conversation.
 
-## Product links
-Tell users: "You can click the product cards shown below my messages to go directly to each product page."
-
 ## Comparisons
 Format as a compact markdown table: Product | Price | Best For. Keep cells under 8 words.
 
@@ -344,8 +345,10 @@ async def search_products(query: str) -> str:
         plus any FAQ answers and customer review summaries related to the query.
     """
     context, sources, rag_meta = await get_relevant_context(query)
-    _cv_sources.set(sources)
-    _cv_rag_meta.set(rag_meta)
+    mid = _cv_message_id.get("")
+    if mid:
+        _sources_store[mid] = sources
+        _rag_meta_store[mid] = rag_meta
     return context if context else "No matching products found in our catalog for that query."
 
 # ── ADK Agent + Runner ────────────────────────────────────────────────────────
@@ -535,9 +538,10 @@ async def chat_stream(request: ChatRequest):
             except Exception:
                 pass
 
-        # Reset ContextVars for this request
-        _cv_sources.set([])
-        _cv_rag_meta.set({})
+        # Bind message_id into ContextVar so the ADK tool can write sources to the store
+        _cv_message_id.set(message_id)
+        _sources_store.pop(message_id, None)
+        _rag_meta_store.pop(message_id, None)
 
         # Run ADK agent, streaming tokens
         full_response = ""
@@ -592,9 +596,9 @@ async def chat_stream(request: ChatRequest):
         llm_ms = int((time.monotonic() - t_llm) * 1000)
         latency_ms = int((time.monotonic() - t0) * 1000)
 
-        # Retrieve sources set by search_products tool
-        raw_sources = _cv_sources.get([])
-        rag_meta    = _cv_rag_meta.get({})
+        # Retrieve sources written by search_products tool (via module-level store)
+        raw_sources = _sources_store.pop(message_id, [])
+        rag_meta    = _rag_meta_store.pop(message_id, {})
 
         # Filter to sources Gemini actually mentioned in the response
         mentioned = [s for s in raw_sources if s["name"].lower() in full_response.lower()]
@@ -665,7 +669,8 @@ async def chat(request: ChatRequest):
     history = request.history or []
 
     await _ensure_session(session_id, history)
-    _cv_sources.set([])
+    _cv_message_id.set(message_id)
+    _sources_store.pop(message_id, None)
 
     full_response = ""
     try:
@@ -681,7 +686,7 @@ async def chat(request: ChatRequest):
         logger.error(f"ADK runner error (non-stream): {e}")
         raise HTTPException(status_code=502, detail="LLM error")
 
-    raw_sources = _cv_sources.get([])
+    raw_sources = _sources_store.pop(message_id, [])
     mentioned = [s for s in raw_sources if s["name"].lower() in full_response.lower()]
     final_sources = mentioned if mentioned else raw_sources
     is_unanswered = detect_unanswered(full_response, len(final_sources), history)
