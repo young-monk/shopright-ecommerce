@@ -329,13 +329,14 @@ If not related to home improvement or shopping, respond: "I'm here to help you f
 
 # ── ADK Tool: search_products ─────────────────────────────────────────────────
 async def search_products(query: str) -> str:
-    """Search the ShopRight product catalog for home improvement products, tools, and materials.
+    """Search the ShopRight knowledge base: products, FAQs, and customer reviews.
 
     Use this tool whenever the user asks about products, prices, brands, recommendations,
-    comparisons, or wants to find anything sold in the store.
+    comparisons, store policies (returns, shipping, warranty), or any question that
+    ShopRight's catalog or FAQ data could answer.
 
     Args:
-        query: Product search query describing what the customer is looking for.
+        query: Search query describing what the customer is looking for.
 
     Returns:
         Relevant product listings with names, prices, descriptions, and specifications,
