@@ -9,9 +9,9 @@
     "lint": "eslint src --ext .ts,.tsx"
   },
   "devDependencies": {
+    "@typescript-eslint/parser": "^7.0.0",
     "eslint": "^8.57.0",
-    "eslint-config-next": "^15.0.0",
-    "@typescript-eslint/parser": "^7.0.0"
+    "eslint-config-next": "^15.0.0"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.40.0",
@@ -27,10 +27,11 @@
     "react-dom": "^18",
     "react-hook-form": "^7.51.5",
     "react-hot-toast": "^2.4.1",
+    "react-markdown": "^9.0.1",
+    "remark-gfm": "^4.0.1",
     "tailwindcss": "^3.4.1",
     "typescript": "^5",
     "zod": "^3.23.8",
-    "zustand": "^4.5.2",
-    "react-markdown": "^9.0.1"
+    "zustand": "^4.5.2"
   }
 }
