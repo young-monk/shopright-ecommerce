@@ -1,6 +1,7 @@
 'use client'
 import Link from 'next/link'
 import { ShoppingCart, Search, User } from 'lucide-react'
+import { CATEGORIES } from '@/lib/categories'
 import { useCartStore } from '@/store/cartStore'
 import { useState, type FormEvent } from 'react'
 import { useRouter } from 'next/navigation'
@@ -63,13 +64,9 @@ export function Navbar() {
 
         {/* Category nav */}
         <div className="flex flex-wrap gap-6 mt-2 text-sm">
-          {[
-            'Power Tools', 'Hand Tools', 'Building Materials', 'Electrical',
-            'Plumbing', 'Paint & Supplies', 'Flooring', 'Outdoor & Garden',
-            'Storage & Organization', 'Safety & Security', 'Heating & Cooling',
-          ].map(cat => (
-            <Link key={cat} href={`/products?category=${encodeURIComponent(cat)}`} className="hover:text-primary whitespace-nowrap">
-              {cat}
+          {CATEGORIES.map(cat => (
+            <Link key={cat.slug} href={`/products?category=${encodeURIComponent(cat.slug)}`} className="hover:text-primary whitespace-nowrap">
+              {cat.name}
             </Link>
           ))}
         </div>

@@ -74,6 +74,7 @@ services:
       - PRODUCT_SERVICE_URL=http://product-service:8001
       - ORDER_SERVICE_URL=http://order-service:8002
       - USER_SERVICE_URL=http://user-service:8003
+      - ALLOWED_ORIGINS=http://localhost:3000
     depends_on:
       - product-service
       - order-service

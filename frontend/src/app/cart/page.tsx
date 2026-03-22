@@ -100,9 +100,9 @@ export default function CartPage() {
                 <span>${total().toFixed(2)}</span>
               </div>
               <p className="text-xs text-green-600">Free shipping on this order!</p>
-              <button className="w-full bg-primary hover:bg-primary-dark text-white py-3 rounded font-medium transition-colors">
+              <Link href="/checkout" className="block w-full bg-primary hover:bg-primary-dark text-white py-3 rounded font-medium transition-colors text-center">
                 Proceed to Checkout
-              </button>
+              </Link>
               <Link href="/products" className="block text-center text-sm text-primary hover:underline">
                 Continue Shopping
               </Link>

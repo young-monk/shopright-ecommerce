@@ -52,9 +52,7 @@ class OrderCreate(BaseModel):
 
 app = FastAPI(title="Order Service", version="1.0.0")
 
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
-)
+# No CORS needed — this service is internal, only called by the API gateway
 
 async def get_db():
     async with async_session() as session:

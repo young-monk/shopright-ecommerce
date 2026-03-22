@@ -1,18 +1,5 @@
 import Link from 'next/link'
-
-const CATEGORIES = [
-  { name: 'Power Tools',            icon: '🔩', slug: 'Power Tools' },
-  { name: 'Hand Tools',             icon: '🔧', slug: 'Hand Tools' },
-  { name: 'Building Materials',     icon: '🧱', slug: 'Building Materials' },
-  { name: 'Electrical',             icon: '⚡', slug: 'Electrical' },
-  { name: 'Plumbing',               icon: '🚿', slug: 'Plumbing' },
-  { name: 'Paint & Supplies',       icon: '🎨', slug: 'Paint & Supplies' },
-  { name: 'Flooring',               icon: '🪵', slug: 'Flooring' },
-  { name: 'Outdoor & Garden',       icon: '🌱', slug: 'Outdoor & Garden' },
-  { name: 'Storage & Organization', icon: '📦', slug: 'Storage & Organization' },
-  { name: 'Safety & Security',      icon: '🔒', slug: 'Safety & Security' },
-  { name: 'Heating & Cooling',      icon: '❄️', slug: 'Heating & Cooling' },
-]
+import { CATEGORIES } from '@/lib/categories'
 
 export function CategoryGrid() {
   return (

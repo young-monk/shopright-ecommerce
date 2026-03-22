@@ -1,6 +1,9 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Response, Cookie, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Boolean, DateTime, select
@@ -13,7 +16,9 @@ from jose import JWTError, jwt
 import os, uuid
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://shopright:shopright_dev@localhost:5432/shopright")
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-prod")
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable is required and not set")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_MINUTES = 60 * 24  # 24 hours
 
@@ -44,11 +49,12 @@ class LoginRequest(BaseModel):
     email: str
     password: str
 
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="User Service", version="1.0.0")
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
-)
+# No CORS needed — this service is internal, only called by the API gateway
 
 async def get_db():
     async with async_session() as session:
@@ -62,19 +68,30 @@ def create_token(user_id: str, email: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security), db: AsyncSession = Depends(get_db)):
+def _decode_token(token: str) -> User | None:
     try:
-        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        result = await db.execute(select(User).where(User.id == user_id))
-        user = result.scalar_one_or_none()
-        if not user:
-            raise HTTPException(status_code=401, detail="User not found")
-        return user
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError:
+        return None
+
+async def get_current_user(
+    db: AsyncSession = Depends(get_db),
+    auth_token: str | None = Cookie(default=None),
+    credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False)),
+):
+    # Accept token from httpOnly cookie (preferred) or Authorization header (API clients)
+    raw_token = auth_token or (credentials.credentials if credentials else None)
+    if not raw_token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    payload = _decode_token(raw_token)
+    if not payload:
         raise HTTPException(status_code=401, detail="Invalid token")
+    user_id = payload.get("sub")
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return user
 
 @app.on_event("startup")
 async def startup():
@@ -85,8 +102,22 @@ async def startup():
 async def health():
     return {"status": "healthy", "service": "user-service"}
 
+_SECURE_COOKIE = os.getenv("ENVIRONMENT", "development") == "production"
+
+def _set_auth_cookie(response: Response, token: str):
+    response.set_cookie(
+        key="auth_token",
+        value=token,
+        httponly=True,
+        secure=_SECURE_COOKIE,      # HTTPS-only in prod
+        samesite="lax",
+        max_age=JWT_EXPIRE_MINUTES * 60,
+        path="/",
+    )
+
 @app.post("/users/register", status_code=201)
-async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
+@limiter.limit("5/minute")
+async def register(request: Request, data: UserCreate, response: Response, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == data.email))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Email already registered")
@@ -99,16 +130,24 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(user)
     token = create_token(str(user.id), user.email)
-    return {"user_id": str(user.id), "email": user.email, "token": token}
+    _set_auth_cookie(response, token)
+    return {"user_id": str(user.id), "email": user.email}
 
 @app.post("/users/login")
-async def login(data: LoginRequest, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def login(request: Request, data: LoginRequest, response: Response, db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(User).where(User.email == data.email))
     user = result.scalar_one_or_none()
     if not user or not pwd_context.verify(data.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     token = create_token(str(user.id), user.email)
-    return {"user_id": str(user.id), "email": user.email, "full_name": user.full_name, "token": token}
+    _set_auth_cookie(response, token)
+    return {"user_id": str(user.id), "email": user.email, "full_name": user.full_name}
+
+@app.post("/users/logout")
+async def logout(response: Response):
+    response.delete_cookie(key="auth_token", path="/")
+    return {"status": "logged out"}
 
 @app.get("/users/me")
 async def get_me(current_user: User = Depends(get_current_user)):

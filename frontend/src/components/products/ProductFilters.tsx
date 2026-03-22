@@ -1,4 +1,5 @@
 'use client'
+import { CATEGORY_NAMES } from '@/lib/categories'
 
 interface Filters {
   category: string
@@ -6,12 +7,6 @@ interface Filters {
   maxPrice: number
   search: string
 }
-
-const CATEGORIES = [
-  'Power Tools', 'Hand Tools', 'Building Materials', 'Electrical',
-  'Plumbing', 'Paint & Supplies', 'Flooring', 'Outdoor & Garden',
-  'Storage & Organization', 'Safety & Security', 'Heating & Cooling',
-]
 
 export function ProductFilters({ filters, onChange }: { filters: Filters; onChange: (f: Filters) => void }) {
   return (
@@ -30,7 +25,7 @@ export function ProductFilters({ filters, onChange }: { filters: Filters; onChan
             />
             <span className="text-sm">All Categories</span>
           </label>
-          {CATEGORIES.map(cat => (
+          {CATEGORY_NAMES.map(cat => (
             <label key={cat} className="flex items-center gap-2 cursor-pointer">
               <input
                 type="radio"

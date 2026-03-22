@@ -371,6 +371,10 @@ resource "google_cloud_run_v2_service" "api_gateway" {
         name  = "USER_SERVICE_URL"
         value = google_cloud_run_v2_service.user_service.uri
       }
+      env {
+        name  = "ALLOWED_ORIGINS"
+        value = google_cloud_run_v2_service.frontend.uri
+      }
       resources {
         limits = { cpu = "1", memory = "512Mi" }
       }
