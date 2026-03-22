@@ -326,6 +326,40 @@ def detect_category(query: str) -> str | None:
             return category
     return None
 
+# ── HyDE: Hypothetical Document Embedding ────────────────────────────────────
+async def generate_hypothetical_document(query: str) -> str:
+    """
+    HyDE: ask Gemini to write a short hypothetical product description that
+    would answer the query, then embed *that* instead of the raw query.
+    Product descriptions live in a different vector space than questions —
+    HyDE bridges the gap and consistently improves retrieval confidence.
+    Falls back to the raw query on any error.
+    """
+    if not GEMINI_API_KEY:
+        return query
+    prompt = (
+        f"Write a 2-sentence product description (max 50 words) for a home improvement "
+        f"product that would perfectly answer this customer query: \"{query}\"\n\n"
+        f"Output only the product description, no preamble or explanation:"
+    )
+    url = f"{GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 80, "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.post(url, json=payload)
+            if resp.status_code == 200:
+                parts = resp.json()["candidates"][0]["content"]["parts"]
+                text = next((p["text"] for p in parts if "text" in p), None)
+                if text:
+                    logger.info(f"HyDE: '{query[:60]}' → '{text.strip()[:80]}'")
+                    return text.strip()
+    except Exception as e:
+        logger.warning(f"HyDE failed, falling back to raw query: {e}")
+    return query
+
 # ── Price extraction ──────────────────────────────────────────────────────────
 _PRICE_PATTERNS = [
     r'under\s*\$?(\d+(?:\.\d+)?)',
@@ -349,9 +383,13 @@ def extract_price_limit(query: str) -> float | None:
 
 # ── RAG: Hybrid Vector + Keyword Search ──────────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[ProductSource], dict]:
-    vector = await gemini_embed(query)
+    # HyDE: embed a hypothetical answer doc rather than the raw query
+    hyde_doc = await generate_hypothetical_document(query)
+    hyde_used = hyde_doc != query
+    # Use RETRIEVAL_DOCUMENT so the vector lives in the same space as indexed products
+    vector = await gemini_embed(hyde_doc, task_type="RETRIEVAL_DOCUMENT")
     if not vector:
-        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
+        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
 
     detected_category = detect_category(query)
     price_limit = extract_price_limit(query)
@@ -439,7 +477,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
 
         await conn.close()
 
-        rag_meta = {"price_filter_used": price_limit is not None, "price_filter_value": price_limit, "detected_category": detected_category}
+        rag_meta = {"price_filter_used": price_limit is not None, "price_filter_value": price_limit, "detected_category": detected_category, "hyde_used": hyde_used}
 
         if not rows:
             rag_meta.update({"rag_confidence": 0.0, "rag_empty": True})
@@ -471,7 +509,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
 
     except Exception as e:
         logger.warning(f"RAG retrieval failed: {e}")
-        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
+        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
 
 # ── Unanswered detection ──────────────────────────────────────────────────────
 def detect_unanswered(response: str, sources_count: int, history: List[ChatMessage]) -> bool:
@@ -642,6 +680,7 @@ async def chat_stream(request: ChatRequest):
             "price_filter_value": rag_meta.get("price_filter_value"),
             "detected_category": rag_meta.get("detected_category"),
             "query_rewritten": was_rewritten,
+            "hyde_used": rag_meta.get("hyde_used", False),
             "tokens_in": tokens_in, "tokens_out": tokens_out,
             "estimated_cost_usd": round(cost, 8),
         }
@@ -743,6 +782,7 @@ async def metrics_summary():
             "empty_results_rate": pct(rag_empty),
             "price_filter_usage_rate": pct(price_filtered),
             "query_rewrite_rate": pct(rewritten),
+            "hyde_usage_rate": pct([m for m in _req_metrics if m.get("hyde_used")]),
         },
         "tokens": {
             "avg_input":  int(sum(tokens_in)/len(tokens_in))   if tokens_in  else 0,
@@ -792,9 +832,14 @@ async def ingest_products():
     ingested = 0
     for product in products:
         specs = product['specifications'] or ""
+        # Rich document text — written like a product description a customer would read,
+        # so HyDE-generated hypothetical descriptions match this space closely
         text = (
-            f"Category: {product['category']}. Product type: {product['name']}. "
-            f"Brand: {product['brand']}. {product['description']}. Key features: {specs}"
+            f"{product['name']} by {product['brand']}. "
+            f"Category: {product['category']}. "
+            f"Price: ${product['price']:.2f}. "
+            f"{product['description']}. "
+            f"Specifications and key features: {specs}."
         ).strip()
         vector = await gemini_embed(text, task_type="RETRIEVAL_DOCUMENT")
         if vector is None:
