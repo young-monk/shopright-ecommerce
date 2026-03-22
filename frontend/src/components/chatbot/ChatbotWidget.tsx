@@ -38,7 +38,7 @@ export function ChatbotWidget() {
   ])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [sessionId] = useState(() => crypto.randomUUID())
+  const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
   const [sessionEnded, setSessionEnded] = useState(false)
   const [reviewSubmitted, setReviewSubmitted] = useState(false)
   const [hoveredStar, setHoveredStar] = useState(0)
@@ -152,6 +152,20 @@ export function ChatbotWidget() {
     } catch {
       // non-critical
     }
+  }
+
+  const startNewSession = () => {
+    setMessages([{
+      id: '0',
+      role: 'assistant',
+      content: "Hi! I'm ShopRight's AI assistant. I can help you find products, answer questions about home improvement, and provide expert advice. How can I help you today?",
+      timestamp: new Date(),
+    }])
+    setSessionId(crypto.randomUUID())
+    setSessionEnded(false)
+    setReviewSubmitted(false)
+    setHoveredStar(0)
+    setInput('')
   }
 
   const submitReview = async (stars: number) => {
@@ -309,7 +323,15 @@ export function ChatbotWidget() {
           {/* Input */}
           <div className="p-4 border-t border-gray-200">
             {sessionEnded ? (
-              <p className="text-xs text-center text-gray-400">Session ended. Start a new chat anytime!</p>
+              <div className="flex flex-col items-center gap-2">
+                <p className="text-xs text-gray-400">Session ended.</p>
+                <button
+                  onClick={startNewSession}
+                  className="w-full bg-primary hover:bg-primary-dark text-white text-sm rounded-lg py-2 transition-colors"
+                >
+                  Start new chat
+                </button>
+              </div>
             ) : (
               <div className="flex gap-2">
                 <input
