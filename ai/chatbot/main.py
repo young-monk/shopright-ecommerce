@@ -238,16 +238,21 @@ async def gemini_stream(contents: list, system_prompt: str, metrics_ctx: dict | 
         yield "Sorry, the request timed out. Please try again."
 
 # ── Query rewriting for follow-ups ───────────────────────────────────────────
+# Multi-word signals are safe as substring checks.
+# Single short words ("it", "them", "any") must be whole-word matched to avoid
+# false substring hits (e.g. "it" inside "capital", "them" inside "theme").
 _FOLLOWUP_SIGNALS = [
     "cheaper", "more expensive", "similar", "another", "else", "instead",
-    "that one", "this one", "those", "these", "it", "them", "show me more",
+    "that one", "this one", "those", "these", "show me more",
     "what about", "how about", "any other", "alternatives",
     # Price filter follow-ups
     "below", "under", "less than", "cheaper than", "above", "over", "more than",
     "within", "budget", "price range", "affordable",
     # Vague references that need context
-    "anything", "something", "any", "do you have", "got any", "show me",
+    "anything", "something", "do you have", "got any", "show me",
 ]
+# Short whole-word-only follow-up signals (checked separately with word boundary)
+_FOLLOWUP_SIGNALS_WORD = {"it", "them", "any"}
 
 async def rewrite_query(message: str, history: List[ChatMessage]) -> tuple[str, bool]:
     """
@@ -258,9 +263,11 @@ async def rewrite_query(message: str, history: List[ChatMessage]) -> tuple[str, 
         return message, False
 
     msg_lower = message.lower()
+    msg_words = set(re.findall(r'\b\w+\b', msg_lower))
     is_followup = (
         len(message.split()) <= 12 and
-        any(sig in msg_lower for sig in _FOLLOWUP_SIGNALS)
+        (any(sig in msg_lower for sig in _FOLLOWUP_SIGNALS) or
+         bool(msg_words & _FOLLOWUP_SIGNALS_WORD))
     )
     if not is_followup:
         return message, False
@@ -311,12 +318,23 @@ CONVERSATIONAL_PHRASES = [
 ]
 
 NON_PRODUCT_PATTERNS = [
-    # SQL / code
+    # SQL
     "select ", "insert ", "update ", "delete ", "drop ", "create table",
-    "from ", "where ", "join ", "group by", "order by",
+    "from ", "where ", "join ", "group by", "order by", "* from", "SELECT *",
+    # Programming
     "def ", "class ", "import ", "function ", "console.log", "print(",
-    "* from", "SELECT *",
+    "java ", "python ", "javascript ", "typescript ", "c++ ", "c# ", "ruby ",
+    "write code", "write a function", "write a program", "write a script",
+    "code for ", "algorithm for", "implement a", "how to code",
+    # Math / general knowledge
+    "what is the formula", "what is the equation", "solve for",
+    "calculate the ", "how many calories", "convert ", "translate ",
+    "what year", "who is ", "who was ", "tell me a joke", "write a poem",
+    "what does", "define ", "synonym ", "antonym ", "spell ",
 ]
+
+# Arithmetic expression — digits with operators, no product keywords
+_MATH_EXPR = re.compile(r'^\s*[\d\s\+\-\*\/\^\(\)\.%]+\s*[=\?]?\s*$')
 
 # Customer service queries — don't run RAG, bot will direct to support
 CUSTOMER_SERVICE_PATTERNS = [
@@ -356,25 +374,47 @@ def is_wellbeing_message(message: str) -> bool:
 
 def is_product_query(query: str) -> bool:
     query_lower = query.lower().strip()
+
+    # Hard exclusions — never run RAG for these
+    if _MATH_EXPR.match(query_lower):
+        return False
     if any(p.lower() in query_lower for p in NON_PRODUCT_PATTERNS):
         return False
     if any(p in query_lower for p in CUSTOMER_SERVICE_PATTERNS):
         return False
     if is_wellbeing_message(query):
         return False
+
+    # Short conversational phrases
     if len(query_lower.split()) <= 3:
         if any(phrase in query_lower for phrase in CONVERSATIONAL_PHRASES):
             return False
+
+    # Positive signals — only return True if there's actual product/home-improvement intent
     if any(kw in query_lower for kw in PRODUCT_INTENT_KEYWORDS):
         return True
     if detect_category(query) is not None:
         return True
-    if any(p in query_lower for p in ["what is", "what are", "which", "how do i", "how to", "can i use"]):
-        return True
-    # Also treat follow-up signals as product queries if there's history
+    # "how do i / how to" only counts when paired with a home-improvement word
+    _HOME_CONTEXT = ["fix", "install", "repair", "replace", "build", "paint",
+                     "drill", "cut", "wire", "plumb", "tile", "floor", "seal"]
+    if any(p in query_lower for p in ["how do i", "how to", "can i use"]):
+        if any(w in query_lower for w in _HOME_CONTEXT):
+            return True
+    # "which / what are" only if a category keyword is also present
+    if any(p in query_lower for p in ["which", "what are"]):
+        if detect_category(query) is not None:
+            return True
+    # Follow-up signals (cheaper, under $X, show me more)
     if any(sig in query_lower for sig in _FOLLOWUP_SIGNALS):
         return True
-    return len(query_lower.split()) > 4
+    # Short whole-word signals ("it", "them", "any") — word boundary check
+    words = set(re.findall(r'\b\w+\b', query_lower))
+    if words & _FOLLOWUP_SIGNALS_WORD:
+        return True
+
+    # Default: don't run RAG — let the LLM handle it as general conversation
+    return False
 
 # ── Category detection ────────────────────────────────────────────────────────
 def detect_category(query: str) -> str | None:
