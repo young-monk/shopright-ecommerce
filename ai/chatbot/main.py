@@ -47,6 +47,17 @@ BQ_DATASET     = os.getenv("BIGQUERY_DATASET", "chat_analytics")
 BQ_TABLE       = os.getenv("BIGQUERY_TABLE", "chat_logs")
 BQ_FEEDBACK_TABLE = os.getenv("BIGQUERY_FEEDBACK_TABLE", "feedback")
 BQ_EVENTS_TABLE   = os.getenv("BIGQUERY_EVENTS_TABLE", "chat_events")
+COHERE_API_KEY    = os.getenv("COHERE_API_KEY", "")
+
+# Cohere rerank client (optional — graceful fallback if key not set)
+_co = None
+if COHERE_API_KEY:
+    try:
+        import cohere as _cohere_lib
+        _co = _cohere_lib.ClientV2(api_key=COHERE_API_KEY)
+        logger.info("Cohere rerank enabled (rerank-v3.5)")
+    except ImportError:
+        logger.warning("cohere package not installed — rerank disabled")
 
 GEMINI_CONTEXT_LIMIT = 1_000_000
 
@@ -177,7 +188,7 @@ def extract_price_limit(query: str) -> float | None:
 
 # ── RAG: knowledge_embeddings hybrid search ───────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, dict]:
-    """Search knowledge_embeddings (products + FAQs + review summaries) for relevant context."""
+    """Search knowledge_embeddings with hybrid ANN + optional Cohere rerank."""
     vector, embed_ms = await gemini_embed(query, task_type="RETRIEVAL_QUERY")
     if not vector:
         return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False,
@@ -206,6 +217,9 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             kw_regex = "|".join(re.escape(k) for k in keywords)
             keyword_bonus = f"CASE WHEN LOWER(content) ~ '{kw_regex}' THEN 0.15 ELSE 0 END"
 
+        # Fetch more candidates when rerank is available (50), else use top_k directly
+        ann_limit = 50 if _co else top_k
+
         # Query all three doc types — use halfvec cast to hit the HNSW index
         # (pgvector's vector(3072) exceeds the 2000-dim ANN limit; halfvec lifts it to 16000)
         rows = await conn.fetch(
@@ -218,7 +232,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             ORDER BY (embedding::halfvec(3072) <=> $1::halfvec(3072)) - {keyword_bonus}
             LIMIT $2
             """,
-            str(vector), top_k,
+            str(vector), ann_limit,
         )
 
         db_ms = int((time.monotonic() - t_db) * 1000)
@@ -236,13 +250,28 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             rag_meta.update({"rag_confidence": None, "rag_empty": True})
             return "", [], rag_meta
 
-        # Re-rank by combined score
-        ranked_all = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
+        # ── Rerank ────────────────────────────────────────────────────────────
+        rerank_used = False
+        if _co and rows:
+            try:
+                rr = _co.rerank(
+                    query=query,
+                    documents=[r["content"] for r in rows],
+                    top_n=min(16, len(rows)),
+                    model="rerank-v3.5",
+                )
+                reranked_rows = [rows[hit.index] for hit in rr.results]
+                rerank_used = True
+            except Exception as e:
+                logger.warning(f"Cohere rerank failed, falling back to hybrid score: {e}")
+                reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
+        else:
+            reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
 
-        # Deduplicate product rows by name; keep all FAQs and review summaries (bounded by top_k)
+        # Deduplicate product rows by name; keep all FAQs and review summaries
         seen_names: dict = {}
         deduped = []
-        for row in ranked_all:
+        for row in reranked_rows:
             if row["doc_type"] == "product":
                 meta = json.loads(row["metadata"])
                 name = meta.get("name", "")
@@ -251,7 +280,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
                     deduped.append(row)
             else:
                 deduped.append(row)
-        dedup_removed = len(ranked_all) - len(deduped)
+        dedup_removed = len(reranked_rows) - len(deduped)
         ranked = deduped[:8]
 
         avg_dist = sum(float(r["vec_dist"]) for r in ranked) / len(ranked)
@@ -263,6 +292,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             "dedup_removed_count": dedup_removed,
             "unique_brands_count": len({json.loads(r["metadata"]).get("brand") for r in product_rows}),
             "unique_categories_count": len({json.loads(r["metadata"]).get("category") for r in product_rows}),
+            "rerank_used": rerank_used,
         })
 
         context_parts = []
@@ -609,7 +639,7 @@ async def chat_stream(request: ChatRequest):
 
         # Filter to sources Gemini actually mentioned in the response
         mentioned = [s for s in raw_sources if s["name"].lower() in full_response.lower()]
-        final_sources = mentioned if mentioned else raw_sources
+        final_sources = mentioned  # only show chips for products the bot actually named
 
         is_unanswered = detect_unanswered(full_response, len(final_sources), history)
 
@@ -695,7 +725,7 @@ async def chat(request: ChatRequest):
 
     raw_sources = _sources_store.pop(message_id, [])
     mentioned = [s for s in raw_sources if s["name"].lower() in full_response.lower()]
-    final_sources = mentioned if mentioned else raw_sources
+    final_sources = mentioned  # only show chips for products the bot actually named
     is_unanswered = detect_unanswered(full_response, len(final_sources), history)
     latency_ms = 0  # not tracked for non-streaming
 
