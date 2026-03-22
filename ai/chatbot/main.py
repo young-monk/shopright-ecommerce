@@ -46,6 +46,16 @@ SESSION_END_PHRASES = [
     "i'm good", "im good", "i'm all good", "that'll do", "no thanks",
 ]
 
+# Short ambiguous words that mean "done" only when the bot was already wrapping up
+_AMBIGUOUS_ENDINGS = {"ok", "okay", "k", "sure", "yep", "nope", "nah", "alright", "cool", "noted"}
+
+# Signals that the bot was wrapping up / offering further help
+_BOT_WRAP_UP_SIGNALS = [
+    "anything else", "let me know", "here if you need", "feel free to ask",
+    "happy to help", "have a great day", "come back", "is there anything",
+    "can i help", "hope that helps", "if you need anything",
+]
+
 SESSION_END_RESPONSE = (
     "You're welcome! Before you go — how would you rate your experience today? "
     "Your feedback helps us improve. ⭐"
@@ -54,10 +64,17 @@ SESSION_END_RESPONSE = (
 def is_session_ending(message: str, history: List) -> bool:
     """Return True if the user is wrapping up the conversation."""
     msg = message.lower().strip()
-    # Must be a short, closing message
     if len(msg.split()) > 6:
         return False
-    return any(phrase in msg for phrase in SESSION_END_PHRASES)
+    if any(phrase in msg for phrase in SESSION_END_PHRASES):
+        return True
+    # Ambiguous one-word replies (ok/sure/nope) only close the session if the
+    # bot's last message was already wrapping up / offering further help
+    if msg in _AMBIGUOUS_ENDINGS and history:
+        last_bot = next((m.content.lower() for m in reversed(history) if m.role == "assistant"), "")
+        if any(signal in last_bot for signal in _BOT_WRAP_UP_SIGNALS):
+            return True
+    return False
 
 UNCERTAINTY_PHRASES = [
     "i don't have", "i don't know", "i'm not sure", "i cannot find",
@@ -191,6 +208,11 @@ _FOLLOWUP_SIGNALS = [
     "cheaper", "more expensive", "similar", "another", "else", "instead",
     "that one", "this one", "those", "these", "it", "them", "show me more",
     "what about", "how about", "any other", "alternatives",
+    # Price filter follow-ups
+    "below", "under", "less than", "cheaper than", "above", "over", "more than",
+    "within", "budget", "price range", "affordable",
+    # Vague references that need context
+    "anything", "something", "any", "do you have", "got any", "show me",
 ]
 
 async def rewrite_query(message: str, history: List[ChatMessage]) -> str:
@@ -204,7 +226,7 @@ async def rewrite_query(message: str, history: List[ChatMessage]) -> str:
 
     msg_lower = message.lower()
     is_followup = (
-        len(message.split()) <= 8 and
+        len(message.split()) <= 12 and
         any(sig in msg_lower for sig in _FOLLOWUP_SIGNALS)
     )
     if not is_followup:
@@ -410,14 +432,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
 def detect_unanswered(response: str, sources_count: int, history: List[ChatMessage]) -> bool:
     response_lower = response.lower()
     has_uncertainty = any(phrase in response_lower for phrase in UNCERTAINTY_PHRASES)
-    no_sources = sources_count == 0
-    if no_sources and has_uncertainty:
-        return True
-    if no_sources and len(history) >= 2:
-        recent_user_msgs = [m for m in history[-4:] if m.role == "user"]
-        if len(recent_user_msgs) >= 2:
-            return True
-    return False
+    return sources_count == 0 and has_uncertainty
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are ShopRight's expert AI assistant for a home improvement store. You are knowledgeable, precise, and safety-conscious.
