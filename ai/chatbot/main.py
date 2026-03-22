@@ -93,19 +93,19 @@ UNCERTAINTY_PHRASES = [
     "can't help with that", "unable to find", "not in our catalog",
 ]
 
+# Keys must match the actual category values stored in the products DB (used in ILIKE filter)
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "Power Tools":            ["drill", "saw", "grinder", "sander", "router", "jigsaw", "circular saw", "impact driver", "nail gun", "heat gun", "power tool"],
     "Hand Tools":             ["hammer", "screwdriver", "wrench", "pliers", "chisel", "hand tool", "tape measure", "level", "utility knife"],
-    "Lawn & Garden":          ["lawn", "mower", "garden", "grass", "trimmer", "edger", "fertilizer", "soil", "mulch", "seed", "weed", "sprinkler", "hose", "rake", "shovel"],
-    "Outdoor Power Equipment":["chainsaw", "leaf blower", "pressure washer", "snow blower", "generator", "outdoor power"],
-    "Plumbing":               ["pipe", "faucet", "toilet", "sink", "drain", "valve", "fitting", "plumbing", "water heater"],
-    "Electrical":             ["wire", "cable", "outlet", "switch", "breaker", "circuit", "electrical", "conduit", "panel"],
+    "Outdoor & Garden":       ["lawn", "mower", "garden", "grass", "trimmer", "edger", "fertilizer", "soil", "mulch", "seed", "weed", "sprinkler", "hose", "rake", "shovel", "chainsaw", "leaf blower", "pressure washer", "snow blower", "generator", "outdoor power"],
+    "Plumbing":               ["pipe", "faucet", "toilet", "sink", "drain", "valve", "fitting", "plumbing", "water heater", "garbage disposal"],
+    "Electrical":             ["wire", "cable", "outlet", "switch", "breaker", "circuit", "electrical", "conduit", "panel", "speaker wire", "in-wall wire", "audio cable"],
     "Flooring":               ["floor", "tile", "hardwood", "laminate", "vinyl", "carpet", "grout", "underlayment"],
-    "Paint":                  ["paint", "primer", "stain", "brush", "roller", "spray", "coating", "varnish"],
-    "Hardware":               ["bolt", "screw", "nut", "anchor", "hinge", "lock", "latch", "fastener", "hardware"],
-    "Safety":                 ["safety", "glove", "helmet", "goggle", "respirator", "harness", "protective"],
-    "Storage":                ["shelf", "cabinet", "rack", "storage", "organizer", "bin", "drawer"],
-    "HVAC":                   ["hvac", "air conditioner", "heater", "furnace", "duct", "vent", "thermostat", "filter"],
+    "Paint & Supplies":       ["paint", "primer", "stain", "brush", "roller", "spray", "coating", "varnish", "caulk", "sealant"],
+    "Safety & Security":      ["safety", "glove", "helmet", "goggle", "respirator", "harness", "protective", "lock", "deadbolt", "camera", "alarm"],
+    "Storage & Organization": ["shelf", "cabinet", "rack", "storage", "organizer", "bin", "drawer", "pegboard"],
+    "Heating & Cooling":      ["hvac", "air conditioner", "heater", "furnace", "duct", "vent", "thermostat", "filter", "fan", "dehumidifier"],
+    "Building Materials":     ["insulation", "soundproof", "sound dampening", "acoustic", "drywall", "home theatre", "home theater", "theatre room", "theater room", "sound barrier", "noise reduction", "framing", "lumber", "plywood", "concrete", "cement", "batt", "r-value"],
 }
 
 app = FastAPI(title="ShopRight Chatbot", version="2.0.0")
@@ -188,7 +188,9 @@ async def gemini_generate(contents: list, system_prompt: str) -> tuple[str, int]
 
 async def gemini_stream(contents: list, system_prompt: str, metrics_ctx: dict | None = None):
     """Async generator that yields text chunks from Gemini streaming API.
-    Populates metrics_ctx with token counts when the stream completes."""
+    Populates metrics_ctx with token counts and per-step timings.
+    On error, sets metrics_ctx['llm_error_type'] and yields an error message
+    instead of raising (so the SSE stream closes cleanly)."""
     if not GEMINI_API_KEY:
         yield "[Chatbot not configured] Please set GEMINI_API_KEY."
         return
@@ -198,27 +200,42 @@ async def gemini_stream(contents: list, system_prompt: str, metrics_ctx: dict | 
         "contents": contents,
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
     }
-    async with httpx.AsyncClient(timeout=60) as client:
-        async with client.stream("POST", url, json=payload) as response:
-            if response.status_code != 200:
-                body = await response.aread()
-                logger.error(f"Gemini stream error {response.status_code}: {body[:200]}")
-                raise HTTPException(status_code=502, detail=f"LLM error: {response.status_code}")
-            async for line in response.aiter_lines():
-                if line.startswith("data: "):
-                    try:
-                        chunk = json.loads(line[6:])
-                        # Capture token usage from final chunk
-                        if metrics_ctx is not None and "usageMetadata" in chunk:
-                            usage = chunk["usageMetadata"]
-                            metrics_ctx["tokens_in"]  = usage.get("promptTokenCount", 0)
-                            metrics_ctx["tokens_out"] = usage.get("candidatesTokenCount", 0)
-                        parts = chunk["candidates"][0]["content"]["parts"]
-                        text = next((p.get("text", "") for p in parts if "text" in p), "")
-                        if text:
-                            yield text
-                    except (json.JSONDecodeError, KeyError, IndexError):
-                        continue
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            async with client.stream("POST", url, json=payload) as response:
+                if response.status_code != 200:
+                    body = await response.aread()
+                    logger.error(f"Gemini stream error {response.status_code}: {body[:200]}")
+                    if metrics_ctx is not None:
+                        metrics_ctx["llm_error_type"] = str(response.status_code)
+                    yield "Sorry, I encountered an error. Please try again."
+                    return
+                first_token = True
+                async for line in response.aiter_lines():
+                    if line.startswith("data: "):
+                        try:
+                            chunk = json.loads(line[6:])
+                            # Capture token usage from final chunk
+                            if metrics_ctx is not None and "usageMetadata" in chunk:
+                                usage = chunk["usageMetadata"]
+                                metrics_ctx["tokens_in"]  = usage.get("promptTokenCount", 0)
+                                metrics_ctx["tokens_out"] = usage.get("candidatesTokenCount", 0)
+                            parts = chunk["candidates"][0]["content"]["parts"]
+                            text = next((p.get("text", "") for p in parts if "text" in p), "")
+                            if text:
+                                if first_token and metrics_ctx is not None:
+                                    t_start = metrics_ctx.get("_t_llm_start")
+                                    if t_start is not None:
+                                        metrics_ctx["ttft_ms"] = int((time.monotonic() - t_start) * 1000)
+                                    first_token = False
+                                yield text
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            continue
+    except httpx.TimeoutException:
+        logger.error("Gemini stream timeout")
+        if metrics_ctx is not None:
+            metrics_ctx["llm_error_type"] = "timeout"
+        yield "Sorry, the request timed out. Please try again."
 
 # ── Query rewriting for follow-ups ───────────────────────────────────────────
 _FOLLOWUP_SIGNALS = [
@@ -312,11 +329,38 @@ CUSTOMER_SERVICE_PATTERNS = [
     "warranty claim", "damaged item", "wrong item",
 ]
 
+# Emotional / wellbeing signals — respond with empathy, skip RAG
+WELLBEING_PATTERNS = [
+    "feeling low", "feeling sad", "feeling depressed", "feeling lonely",
+    "i'm sad", "im sad", "i'm depressed", "im depressed",
+    "i'm lonely", "im lonely", "i'm not okay", "im not okay",
+    "not doing well", "talk to me", "need someone to talk",
+    "having a hard time", "going through a tough time",
+    "stressed", "anxious", "overwhelmed", "hopeless",
+    "want to hurt", "hurting myself", "end my life", "suicide",
+    "nobody cares", "no one cares", "feel worthless",
+]
+
+WELLBEING_RESPONSE = (
+    "I'm really sorry to hear you're feeling this way. "
+    "I'm a shopping assistant and not equipped to provide the support you deserve right now, "
+    "but please know that help is available.\n\n"
+    "If you're in crisis or need someone to talk to, please reach out to a crisis helpline — "
+    "in the US you can call or text **988** (Suicide & Crisis Lifeline), available 24/7.\n\n"
+    "Take care of yourself. When you're ready, I'm here to help with any home improvement needs. 💙"
+)
+
+def is_wellbeing_message(message: str) -> bool:
+    msg = message.lower().strip()
+    return any(pattern in msg for pattern in WELLBEING_PATTERNS)
+
 def is_product_query(query: str) -> bool:
     query_lower = query.lower().strip()
     if any(p.lower() in query_lower for p in NON_PRODUCT_PATTERNS):
         return False
     if any(p in query_lower for p in CUSTOMER_SERVICE_PATTERNS):
+        return False
+    if is_wellbeing_message(query):
         return False
     if len(query_lower.split()) <= 3:
         if any(phrase in query_lower for phrase in CONVERSATIONAL_PHRASES):
@@ -396,9 +440,10 @@ def extract_price_limit(query: str) -> float | None:
     return None
 
 # ── RAG: Hybrid Vector + Keyword Search ──────────────────────────────────────
-async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[ProductSource], dict]:
-    # HyDE: embed a hypothetical answer doc rather than the raw query
-    hyde_doc = await generate_hypothetical_document(query)
+async def get_relevant_context(query: str, top_k: int = 10, hyde_doc: str | None = None) -> tuple[str, list[ProductSource], dict]:
+    # HyDE: if a pre-generated hypothetical doc is provided use it; otherwise generate one here
+    if hyde_doc is None:
+        hyde_doc = await generate_hypothetical_document(query)
     hyde_used = hyde_doc != query
     # Use RETRIEVAL_DOCUMENT so the vector lives in the same space as indexed products
     vector = await gemini_embed(hyde_doc, task_type="RETRIEVAL_DOCUMENT")
@@ -537,6 +582,11 @@ SYSTEM_PROMPT = """You are ShopRight's expert AI assistant for a home improvemen
 ## Your role
 Help customers find the right products for their projects, understand specifications, compare options, and get practical advice on home improvement tasks.
 
+## CRITICAL: Only recommend products from the provided catalog context
+NEVER invent, fabricate, or guess product names, brands, or prices. You may ONLY name and price products that appear verbatim in the "Relevant products from our catalog" section provided with the user's message.
+- If the catalog context doesn't contain a relevant product, say so honestly and suggest the customer ask a store associate — do not make up a product.
+- If catalog context is not provided at all, do not recommend specific products.
+
 ## Ask before recommending
 When a product request is vague (no budget, use case, or preference stated), ask 1-2 short clarifying questions BEFORE recommending. Examples:
 - "I need a drill" → "What will you mainly use it for — light home tasks or heavy-duty work? And do you have a budget in mind?"
@@ -547,10 +597,15 @@ Only ask once — if the user has already given enough context, go straight to r
 ## How to answer product questions
 When product catalog context is provided:
 1. Recommend the MOST RELEVANT product(s) from the catalog — match the customer's stated need precisely.
-2. Always include the product name, brand, and exact price (e.g. "The DeWalt 20V MAX Drill at $129.99").
+2. Always include the product name, brand, and exact price from the catalog (e.g. "The DeWalt 20V MAX Drill at $129.99").
 3. If multiple options exist, compare them on the most relevant dimensions (power, price, weight, battery).
 4. Mention compatibility or safety considerations when relevant.
 5. If you already recommended products earlier in this conversation, do NOT repeat the same ones — offer different options or explain why the previous ones are still the best fit.
+
+## Product links
+When a user asks for product links or where to find a product:
+- Tell them: "You can click the product cards shown below my messages to go directly to each product page."
+- Do NOT say you cannot provide links — the product cards in this chat are clickable links.
 
 ## Comparisons
 When the user asks to compare products or uses "vs", "versus", "which is better", format your response as a compact markdown table with columns: Product | Price | Best For. Keep each cell under 8 words. Use short separators (e.g. |---|---|---|). Do not pad or align columns.
@@ -564,8 +619,11 @@ When the user asks to compare products or uses "vs", "versus", "which is better"
 If the catalog note says "[Note: Low confidence match]", be honest that you couldn't find an exact match and suggest the customer browse the listed categories or ask a store associate.
 
 ## When you cannot find a matching product
-- If the user is asking how to fix or repair something (leaky faucet, broken tile, etc.), give practical DIY advice first, then mention any relevant tools, materials, or related products from the catalog that could help (e.g. suggest plumbing tools or faucets if someone asks about a leaky faucet).
+- If the user is asking how to fix or repair something (leaky faucet, broken tile, etc.), give practical DIY advice first, then mention any relevant tools, materials, or related products from the catalog that could help.
 - If no related products exist at all, say: "I couldn't find an exact match in our current catalog for [item]. Please ask a store associate for help." Do NOT fabricate product names or prices.
+
+## Referring back to previous recommendations
+If the user refers to products mentioned earlier in the conversation (e.g. "those structural elements", "the products you mentioned", "the ones above"), recall those specific products from the conversation history and answer based on them — do not redirect to the current catalog context.
 
 ## Off-topic or nonsensical input
 If the message is not related to home improvement, products, or shopping (e.g. SQL queries, code, random text), respond with:
@@ -648,6 +706,12 @@ async def chat_stream(request: ChatRequest):
         history = request.history or []
         turn_number = len([m for m in history if m.role == "assistant"]) + 1
 
+        # Short-circuit: wellbeing / emotional distress — respond with empathy, no RAG
+        if is_wellbeing_message(request.message):
+            yield f"data: {json.dumps({'token': WELLBEING_RESPONSE, 'done': False})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': False})}\n\n"
+            return
+
         # Short-circuit: session ending — skip RAG, stream canned farewell
         if is_session_ending(request.message, history):
             for token in SESSION_END_RESPONSE.split(" "):
@@ -655,28 +719,35 @@ async def chat_stream(request: ChatRequest):
             yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': True})}\n\n"
             return
 
-        # Step 1: rewrite follow-ups, then RAG
+        # Step 1: rewrite follow-ups, then HyDE + RAG (timed separately)
         metrics_ctx: dict = {}
         was_rewritten = False
         rag_meta: dict = {}
+        hyde_ms = 0
+        rag_ms = 0
         if is_product_query(request.message):
             search_query, was_rewritten = await rewrite_query(request.message, history)
-            context, sources, rag_meta = await get_relevant_context(search_query)
+
+            t_hyde = time.monotonic()
+            hyde_doc = await generate_hypothetical_document(search_query)
+            hyde_ms = int((time.monotonic() - t_hyde) * 1000)
+
+            t_rag = time.monotonic()
+            context, sources, rag_meta = await get_relevant_context(search_query, hyde_doc=hyde_doc)
+            rag_ms = int((time.monotonic() - t_rag) * 1000)
         else:
             context, sources = "", []
-            rag_meta = {"rag_confidence": 0.0, "rag_empty": False, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
+            rag_meta = {"rag_confidence": 0.0, "rag_empty": False, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
 
         # Step 2: stream LLM tokens
         contents = build_contents(request.message, history, context)
         full_response = ""
-        llm_error = False
-        try:
-            async for token in gemini_stream(contents, SYSTEM_PROMPT, metrics_ctx):
-                full_response += token
-                yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-        except HTTPException:
-            llm_error = True
-            yield f"data: {json.dumps({'token': 'Sorry, I encountered an error. Please try again.', 'done': False})}\n\n"
+        t_llm = time.monotonic()
+        metrics_ctx["_t_llm_start"] = t_llm
+        async for token in gemini_stream(contents, SYSTEM_PROMPT, metrics_ctx):
+            full_response += token
+            yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
+        llm_ms = int((time.monotonic() - t_llm) * 1000)
 
         # Step 3: send final metadata event
         latency_ms = int((time.monotonic() - t0) * 1000)
@@ -687,11 +758,15 @@ async def chat_stream(request: ChatRequest):
         tokens_in  = metrics_ctx.get("tokens_in", 0)
         tokens_out = metrics_ctx.get("tokens_out", 0)
         cost = (tokens_in / 1e6 * _COST_PER_1M_IN) + (tokens_out / 1e6 * _COST_PER_1M_OUT)
+        llm_error_type: str | None = metrics_ctx.get("llm_error_type")
+        ttft_ms = metrics_ctx.get("ttft_ms", 0)
         m = {
             "session_id": session_id, "message_id": message_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "latency_ms": latency_ms, "turn_number": turn_number,
-            "is_unanswered": is_unanswered, "llm_error": llm_error,
+            "is_unanswered": is_unanswered,
+            "llm_error": llm_error_type is not None,
+            "llm_error_type": llm_error_type,
             "sources_count": len(sources),
             "rag_confidence": rag_meta.get("rag_confidence", 0.0),
             "rag_empty": rag_meta.get("rag_empty", False),
@@ -700,13 +775,17 @@ async def chat_stream(request: ChatRequest):
             "detected_category": rag_meta.get("detected_category"),
             "query_rewritten": was_rewritten,
             "hyde_used": rag_meta.get("hyde_used", False),
+            "hyde_ms": hyde_ms,
+            "rag_ms": rag_ms,
+            "llm_ms": llm_ms,
+            "ttft_ms": ttft_ms,
             "tokens_in": tokens_in, "tokens_out": tokens_out,
             "estimated_cost_usd": round(cost, 8),
         }
         _req_metrics.append(m)
         if len(_req_metrics) > 1000:
             _req_metrics.pop(0)
-        logger.info(f"[metrics] latency={latency_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={rag_meta.get('rag_confidence',0):.3f} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
+        logger.info(f"[metrics] latency={latency_ms}ms hyde={hyde_ms}ms rag={rag_ms}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={rag_meta.get('rag_confidence',0):.3f} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
 
         asyncio.create_task(log_to_bigquery(
             session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered,
@@ -765,6 +844,18 @@ async def metrics_summary():
     price_filtered = [m for m in _req_metrics if m.get("price_filter_used")]
     rag_empty  = [m for m in _req_metrics if m.get("rag_empty")]
 
+    # Per-step timing lists (only requests where the step ran)
+    hyde_times = sorted(m["hyde_ms"] for m in _req_metrics if m.get("hyde_ms"))
+    rag_times  = sorted(m["rag_ms"]  for m in _req_metrics if m.get("rag_ms"))
+    llm_times  = sorted(m["llm_ms"]  for m in _req_metrics if m.get("llm_ms"))
+    ttft_times = sorted(m["ttft_ms"] for m in _req_metrics if m.get("ttft_ms"))
+
+    # Error type breakdown
+    error_types: dict = defaultdict(int)
+    for m in _req_metrics:
+        if m.get("llm_error_type"):
+            error_types[m["llm_error_type"]] += 1
+
     tokens_in  = [m["tokens_in"]  for m in _req_metrics if m.get("tokens_in")]
     tokens_out = [m["tokens_out"] for m in _req_metrics if m.get("tokens_out")]
     costs      = [m["estimated_cost_usd"] for m in _req_metrics if m.get("estimated_cost_usd")]
@@ -785,16 +876,29 @@ async def metrics_summary():
     def pct(lst): return f"{len(lst)/n*100:.1f}%"
     def p(lst, pc): return lst[min(int(len(lst)*pc/100), len(lst)-1)] if lst else 0
 
+    def avg(lst): return int(sum(lst) / len(lst)) if lst else 0
+
     return {
         "requests_sampled": n,
         "containment_rate": f"{(1 - len(unanswered)/n)*100:.1f}%",
         "unanswered_rate": pct(unanswered),
         "error_rate": pct(errors),
+        "error_types": dict(error_types),
         "latency": {
             "p50_ms": p(latencies, 50),
             "p95_ms": p(latencies, 95),
             "p99_ms": p(latencies, 99),
             "avg_ms": int(sum(latencies) / n),
+        },
+        "step_timings": {
+            "hyde_avg_ms":  avg(hyde_times),
+            "hyde_p95_ms":  p(hyde_times, 95),
+            "rag_avg_ms":   avg(rag_times),
+            "rag_p95_ms":   p(rag_times, 95),
+            "llm_avg_ms":   avg(llm_times),
+            "llm_p95_ms":   p(llm_times, 95),
+            "ttft_avg_ms":  avg(ttft_times),
+            "ttft_p95_ms":  p(ttft_times, 95),
         },
         "rag": {
             "avg_confidence_score": round(sum(confs)/len(confs), 4) if confs else None,
