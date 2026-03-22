@@ -404,47 +404,47 @@ resource "google_bigquery_table" "chat_logs" {
 
   schema = jsonencode([
     # Core identifiers
-    { name = "session_id",              type = "STRING",    mode = "REQUIRED" },
-    { name = "message_id",              type = "STRING",    mode = "REQUIRED" },
-    { name = "timestamp",               type = "TIMESTAMP", mode = "REQUIRED" },
+    { name = "session_id", type = "STRING", mode = "REQUIRED" },
+    { name = "message_id", type = "STRING", mode = "REQUIRED" },
+    { name = "timestamp", type = "TIMESTAMP", mode = "REQUIRED" },
     # Message content
-    { name = "user_message",            type = "STRING",    mode = "REQUIRED" },
-    { name = "assistant_response",      type = "STRING",    mode = "REQUIRED" },
-    { name = "sources_used",            type = "STRING",    mode = "NULLABLE" },
-    { name = "message_length",          type = "INTEGER",   mode = "NULLABLE" },
-    { name = "response_length",         type = "INTEGER",   mode = "NULLABLE" },
+    { name = "user_message", type = "STRING", mode = "REQUIRED" },
+    { name = "assistant_response", type = "STRING", mode = "REQUIRED" },
+    { name = "sources_used", type = "STRING", mode = "NULLABLE" },
+    { name = "message_length", type = "INTEGER", mode = "NULLABLE" },
+    { name = "response_length", type = "INTEGER", mode = "NULLABLE" },
     # Performance
-    { name = "latency_ms",              type = "INTEGER",   mode = "NULLABLE" },
-    { name = "embed_ms",                type = "INTEGER",   mode = "NULLABLE" },
-    { name = "db_ms",                   type = "INTEGER",   mode = "NULLABLE" },
-    { name = "rag_ms",                  type = "INTEGER",   mode = "NULLABLE" },
-    { name = "llm_ms",                  type = "INTEGER",   mode = "NULLABLE" },
-    { name = "ttft_ms",                 type = "INTEGER",   mode = "NULLABLE" },
-    { name = "embed_model",             type = "STRING",    mode = "NULLABLE" },
+    { name = "latency_ms", type = "INTEGER", mode = "NULLABLE" },
+    { name = "embed_ms", type = "INTEGER", mode = "NULLABLE" },
+    { name = "db_ms", type = "INTEGER", mode = "NULLABLE" },
+    { name = "rag_ms", type = "INTEGER", mode = "NULLABLE" },
+    { name = "llm_ms", type = "INTEGER", mode = "NULLABLE" },
+    { name = "ttft_ms", type = "INTEGER", mode = "NULLABLE" },
+    { name = "embed_model", type = "STRING", mode = "NULLABLE" },
     # LLM
-    { name = "tokens_in",               type = "INTEGER",   mode = "NULLABLE" },
-    { name = "tokens_out",              type = "INTEGER",   mode = "NULLABLE" },
-    { name = "estimated_cost_usd",      type = "FLOAT",     mode = "NULLABLE" },
-    { name = "llm_error",               type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "llm_error_type",          type = "STRING",    mode = "NULLABLE" },
+    { name = "tokens_in", type = "INTEGER", mode = "NULLABLE" },
+    { name = "tokens_out", type = "INTEGER", mode = "NULLABLE" },
+    { name = "estimated_cost_usd", type = "FLOAT", mode = "NULLABLE" },
+    { name = "llm_error", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "llm_error_type", type = "STRING", mode = "NULLABLE" },
     # RAG
-    { name = "sources_count",           type = "INTEGER",   mode = "NULLABLE" },
-    { name = "rag_confidence",          type = "FLOAT",     mode = "NULLABLE" },
-    { name = "rag_empty",               type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "detected_category",       type = "STRING",    mode = "NULLABLE" },
-    { name = "price_filter_used",       type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "price_filter_value",      type = "FLOAT",     mode = "NULLABLE" },
-    { name = "query_rewritten",         type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "dedup_removed_count",     type = "INTEGER",   mode = "NULLABLE" },
-    { name = "unique_brands_count",     type = "INTEGER",   mode = "NULLABLE" },
-    { name = "unique_categories_count", type = "INTEGER",   mode = "NULLABLE" },
+    { name = "sources_count", type = "INTEGER", mode = "NULLABLE" },
+    { name = "rag_confidence", type = "FLOAT", mode = "NULLABLE" },
+    { name = "rag_empty", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "detected_category", type = "STRING", mode = "NULLABLE" },
+    { name = "price_filter_used", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "price_filter_value", type = "FLOAT", mode = "NULLABLE" },
+    { name = "query_rewritten", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "dedup_removed_count", type = "INTEGER", mode = "NULLABLE" },
+    { name = "unique_brands_count", type = "INTEGER", mode = "NULLABLE" },
+    { name = "unique_categories_count", type = "INTEGER", mode = "NULLABLE" },
     # Quality signals
-    { name = "is_unanswered",           type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "hallucination_flag",      type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "wellbeing_triggered",     type = "BOOLEAN",   mode = "NULLABLE" },
-    { name = "context_pct",             type = "FLOAT",     mode = "NULLABLE" },
+    { name = "is_unanswered", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "hallucination_flag", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "wellbeing_triggered", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "context_pct", type = "FLOAT", mode = "NULLABLE" },
     # Conversation
-    { name = "turn_number",             type = "INTEGER",   mode = "NULLABLE" },
+    { name = "turn_number", type = "INTEGER", mode = "NULLABLE" },
   ])
 
   time_partitioning {
@@ -458,12 +458,12 @@ resource "google_bigquery_table" "feedback" {
   table_id   = "feedback"
 
   schema = jsonencode([
-    { name = "message_id",         type = "STRING",    mode = "REQUIRED" },
-    { name = "session_id",         type = "STRING",    mode = "REQUIRED" },
-    { name = "timestamp",          type = "TIMESTAMP", mode = "REQUIRED" },
-    { name = "rating",             type = "INTEGER",   mode = "REQUIRED" },
-    { name = "user_message",       type = "STRING",    mode = "NULLABLE" },
-    { name = "assistant_response", type = "STRING",    mode = "NULLABLE" },
+    { name = "message_id", type = "STRING", mode = "REQUIRED" },
+    { name = "session_id", type = "STRING", mode = "REQUIRED" },
+    { name = "timestamp", type = "TIMESTAMP", mode = "REQUIRED" },
+    { name = "rating", type = "INTEGER", mode = "REQUIRED" },
+    { name = "user_message", type = "STRING", mode = "NULLABLE" },
+    { name = "assistant_response", type = "STRING", mode = "NULLABLE" },
   ])
 
   time_partitioning {
@@ -477,12 +477,12 @@ resource "google_bigquery_table" "chat_events" {
   table_id   = "chat_events"
 
   schema = jsonencode([
-    { name = "event_type",   type = "STRING",    mode = "REQUIRED" },
-    { name = "session_id",   type = "STRING",    mode = "REQUIRED" },
-    { name = "timestamp",    type = "TIMESTAMP", mode = "REQUIRED" },
-    { name = "message_id",   type = "STRING",    mode = "NULLABLE" },
-    { name = "product_id",   type = "STRING",    mode = "NULLABLE" },
-    { name = "product_name", type = "STRING",    mode = "NULLABLE" },
+    { name = "event_type", type = "STRING", mode = "REQUIRED" },
+    { name = "session_id", type = "STRING", mode = "REQUIRED" },
+    { name = "timestamp", type = "TIMESTAMP", mode = "REQUIRED" },
+    { name = "message_id", type = "STRING", mode = "NULLABLE" },
+    { name = "product_id", type = "STRING", mode = "NULLABLE" },
+    { name = "product_name", type = "STRING", mode = "NULLABLE" },
   ])
 
   time_partitioning {
@@ -496,9 +496,9 @@ resource "google_bigquery_table" "session_reviews" {
   table_id   = "session_reviews"
 
   schema = jsonencode([
-    { name = "session_id", type = "STRING",    mode = "REQUIRED" },
-    { name = "timestamp",  type = "TIMESTAMP", mode = "REQUIRED" },
-    { name = "stars",      type = "INTEGER",   mode = "REQUIRED" },
+    { name = "session_id", type = "STRING", mode = "REQUIRED" },
+    { name = "timestamp", type = "TIMESTAMP", mode = "REQUIRED" },
+    { name = "stars", type = "INTEGER", mode = "REQUIRED" },
   ])
 
   time_partitioning {
