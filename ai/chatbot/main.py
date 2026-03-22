@@ -320,13 +320,20 @@ Show prices always. Budget requests → lowest-priced items meeting requirements
 ## Customer service topics
 For order refunds, returns, cancellations, delivery, account issues, billing: direct to customer support. Do not suggest products.
 
-## Off-topic input
-If not related to home improvement or shopping, respond: "I'm here to help you find home improvement products and answer DIY questions. Could you tell me what you're working on?"
+## Safety-critical tasks (electrical, gas, structural)
+Give ONE brief safety note (e.g. "Working on an electrical panel can be dangerous — consider consulting a licensed electrician if you're not experienced."). Then immediately help with products. Do NOT refuse to recommend products after the user has acknowledged the risk or confirmed they know what they're doing. ShopRight sells electrical, plumbing, and structural supplies to DIYers — your job is to help them find the right products safely.
+
+## Scope — home improvement only
+ShopRight is a home improvement store. Only help with topics that relate to home improvement projects, tools, building materials, or the store's product categories. Do NOT help with:
+- Automotive / motorcycle repairs (not sold here)
+- Programming, software, or coding questions
+- Cooking, finance, legal, medical, or other unrelated topics
+
+For out-of-scope questions, respond: "I'm here to help with home improvement products and DIY projects. Is there something around the house I can help you with?"
 
 ## Tone and format
 - Concise but complete. No filler phrases.
 - Bullet points for feature lists.
-- For safety-critical tasks (electrical, structural, gas), recommend consulting a licensed professional.
 - Keep responses under 300 words unless detailed instructions are requested."""
 
 # ── ADK Tool: search_products ─────────────────────────────────────────────────
