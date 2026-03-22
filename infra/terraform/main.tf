@@ -415,9 +415,12 @@ resource "google_bigquery_table" "chat_logs" {
     { name = "response_length",         type = "INTEGER",   mode = "NULLABLE" },
     # Performance
     { name = "latency_ms",              type = "INTEGER",   mode = "NULLABLE" },
+    { name = "embed_ms",                type = "INTEGER",   mode = "NULLABLE" },
+    { name = "db_ms",                   type = "INTEGER",   mode = "NULLABLE" },
     { name = "rag_ms",                  type = "INTEGER",   mode = "NULLABLE" },
     { name = "llm_ms",                  type = "INTEGER",   mode = "NULLABLE" },
     { name = "ttft_ms",                 type = "INTEGER",   mode = "NULLABLE" },
+    { name = "embed_model",             type = "STRING",    mode = "NULLABLE" },
     # LLM
     { name = "tokens_in",               type = "INTEGER",   mode = "NULLABLE" },
     { name = "tokens_out",              type = "INTEGER",   mode = "NULLABLE" },

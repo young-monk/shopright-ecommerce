@@ -30,7 +30,7 @@ import asyncio
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from embed import embed as local_embed, preload as preload_embed
+from embed import embed as local_embed, preload as preload_embed, model_name as embed_model_name
 
 # ── Config ───────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
@@ -469,9 +469,9 @@ def extract_price_limit(query: str) -> float | None:
 # ── RAG: Hybrid Vector + Keyword Search ──────────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 15) -> tuple[str, list[ProductSource], dict]:
     # Embed the query locally — no API call, ~10-20ms on CPU
-    vector = await local_embed(query)
+    vector, embed_ms = await local_embed(query)
     if not vector:
-        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
+        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "embed_ms": None, "db_ms": None}
 
     detected_category = detect_category(query)
     price_limit = extract_price_limit(query)
@@ -484,6 +484,7 @@ async def get_relevant_context(query: str, top_k: int = 15) -> tuple[str, list[P
 
     try:
         conn = await asyncpg.connect(DATABASE_URL)
+        t_db = time.monotonic()
 
         if detected_category and keywords:
             keyword_pattern = "%(" + "|".join(keywords) + ")%"
@@ -557,12 +558,14 @@ async def get_relevant_context(query: str, top_k: int = 15) -> tuple[str, list[P
                 str(vector), top_k,
             )
 
+        db_ms = int((time.monotonic() - t_db) * 1000)
         await conn.close()
 
-        rag_meta = {"price_filter_used": price_limit is not None, "price_filter_value": price_limit, "detected_category": detected_category}
+        rag_meta = {"price_filter_used": price_limit is not None, "price_filter_value": price_limit,
+                    "detected_category": detected_category, "embed_ms": embed_ms, "db_ms": db_ms}
 
         if not rows:
-            rag_meta.update({"rag_confidence": 0.0, "rag_empty": True})
+            rag_meta.update({"rag_confidence": None, "rag_empty": True})
             return "", [], rag_meta
 
         # Re-rank: sort by combined score (vec_dist - keyword_bonus)
@@ -784,7 +787,8 @@ async def chat_stream(request: ChatRequest):
             context, sources = "", []
             rag_meta = {"rag_confidence": None, "rag_empty": None, "price_filter_used": False,
                         "price_filter_value": None, "detected_category": None,
-                        "dedup_removed_count": None, "unique_brands_count": None, "unique_categories_count": None}
+                        "dedup_removed_count": None, "unique_brands_count": None,
+                        "unique_categories_count": None, "embed_ms": None, "db_ms": None}
 
         # Step 2: stream LLM tokens
         contents = build_contents(request.message, history, context)
@@ -821,7 +825,10 @@ async def chat_stream(request: ChatRequest):
             "price_filter_value": rag_meta.get("price_filter_value"),
             "detected_category": rag_meta.get("detected_category"),
             "query_rewritten": was_rewritten,
+            "embed_ms": rag_meta.get("embed_ms"),
+            "db_ms": rag_meta.get("db_ms"),
             "rag_ms": rag_ms,
+            "embed_model": embed_model_name(),
             "llm_ms": llm_ms,
             "ttft_ms": ttft_ms,
             "tokens_in": tokens_in, "tokens_out": tokens_out,
@@ -840,7 +847,7 @@ async def chat_stream(request: ChatRequest):
             _req_metrics.pop(0)
         _conf = rag_meta.get('rag_confidence')
         _conf_str = f"{_conf:.3f}" if _conf is not None else "N/A"
-        logger.info(f"[metrics] latency={latency_ms}ms rag={rag_ms}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={_conf_str} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
+        logger.info(f"[metrics] latency={latency_ms}ms embed={rag_meta.get('embed_ms')}ms db={rag_meta.get('db_ms')}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={_conf_str} model={embed_model_name()} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
 
         asyncio.create_task(log_to_bigquery(
             session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered,
@@ -900,9 +907,11 @@ async def metrics_summary():
     rag_empty  = [m for m in _req_metrics if m.get("rag_empty")]
 
     # Per-step timing lists (only requests where the step ran)
-    rag_times  = sorted(m["rag_ms"]  for m in _req_metrics if m.get("rag_ms"))
-    llm_times  = sorted(m["llm_ms"]  for m in _req_metrics if m.get("llm_ms"))
-    ttft_times = sorted(m["ttft_ms"] for m in _req_metrics if m.get("ttft_ms"))
+    rag_times   = sorted(m["rag_ms"]    for m in _req_metrics if m.get("rag_ms"))
+    llm_times   = sorted(m["llm_ms"]    for m in _req_metrics if m.get("llm_ms"))
+    ttft_times  = sorted(m["ttft_ms"]   for m in _req_metrics if m.get("ttft_ms"))
+    embed_times = sorted(m["embed_ms"]  for m in _req_metrics if m.get("embed_ms"))
+    db_times    = sorted(m["db_ms"]     for m in _req_metrics if m.get("db_ms"))
 
     # Error type breakdown
     error_types: dict = defaultdict(int)
@@ -945,6 +954,10 @@ async def metrics_summary():
             "avg_ms": int(sum(latencies) / n),
         },
         "step_timings": {
+            "embed_avg_ms": avg(embed_times),
+            "embed_p95_ms": p(embed_times, 95),
+            "db_avg_ms":    avg(db_times),
+            "db_p95_ms":    p(db_times, 95),
             "rag_avg_ms":   avg(rag_times),
             "rag_p95_ms":   p(rag_times, 95),
             "llm_avg_ms":   avg(llm_times),
