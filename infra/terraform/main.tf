@@ -299,6 +299,10 @@ resource "google_cloud_run_v2_service" "chatbot" {
         name  = "DATABASE_URL"
         value = "postgresql://shopright:${var.db_password}@/shopright?host=/cloudsql/${google_sql_database_instance.postgres.connection_name}"
       }
+      env {
+        name  = "GEMINI_API_KEY"
+        value = var.gemini_api_key
+      }
       resources {
         limits = { cpu = "2", memory = "2Gi" }
       }

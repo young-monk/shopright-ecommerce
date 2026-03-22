@@ -33,6 +33,13 @@ variable "jwt_secret" {
   sensitive   = true
 }
 
+variable "gemini_api_key" {
+  description = "Google Gemini API key for the chatbot service"
+  type        = string
+  sensitive   = true
+  default     = ""
+}
+
 variable "allowed_origins" {
   description = "Comma-separated CORS origins for the API gateway (set to frontend Cloud Run URL after first deploy)"
   type        = string
