@@ -774,13 +774,17 @@ async def chat_stream(request: ChatRequest):
         if is_wellbeing_message(request.message):
             yield f"data: {json.dumps({'token': WELLBEING_RESPONSE, 'done': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': False})}\n\n"
+            _we_latency = int((time.monotonic() - t0) * 1000)
             _we = {"session_id": session_id, "message_id": message_id,
                    "timestamp": datetime.now(timezone.utc).isoformat(),
-                   "latency_ms": int((time.monotonic() - t0) * 1000),
-                   "turn_number": turn_number, "wellbeing_triggered": True,
-                   "is_unanswered": False, "llm_error": False}
+                   "latency_ms": _we_latency, "turn_number": turn_number,
+                   "wellbeing_triggered": True, "is_unanswered": False, "llm_error": False}
             _req_metrics.append(_we)
             if len(_req_metrics) > 1000: _req_metrics.pop(0)
+            asyncio.create_task(log_to_bigquery(
+                session_id, message_id, request.message, WELLBEING_RESPONSE, [], _we_latency, False,
+                extra={"turn_number": turn_number, "wellbeing_triggered": True},
+            ))
             return
 
         # Short-circuit: session ending — skip RAG, stream canned farewell
