@@ -46,6 +46,9 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 _COST_PER_1M_IN  = 0.075
 _COST_PER_1M_OUT = 0.30
 
+GEMINI_CONTEXT_LIMIT = 1_000_000  # Gemini 2.5-flash context window (tokens)
+BQ_EVENTS_TABLE = os.getenv("BIGQUERY_EVENTS_TABLE", "chat_events")
+
 # In-memory metrics buffer (last 1000 requests) — used for /metrics/summary
 # In production, all metrics also flow to BigQuery
 _req_metrics: list[dict] = []
@@ -146,6 +149,13 @@ class FeedbackRequest(BaseModel):
 class ReviewRequest(BaseModel):
     session_id: str
     stars: int  # 1-5
+
+class AnalyticsEventRequest(BaseModel):
+    event_type: str  # "chip_click", "chatbot_open", etc.
+    session_id: str
+    message_id: Optional[str] = None
+    product_id: Optional[str] = None
+    product_name: Optional[str] = None
 
 # ── Gemini helpers ────────────────────────────────────────────────────────────
 async def gemini_embed(text: str, task_type: str = "RETRIEVAL_QUERY") -> list[float] | None:
@@ -583,19 +593,25 @@ async def get_relevant_context(query: str, top_k: int = 15, hyde_doc: str | None
             return "", [], rag_meta
 
         # Re-rank: sort by combined score (vec_dist - keyword_bonus)
-        ranked = sorted(rows, key=lambda r: float(r['vec_dist']) - float(r['keyword_bonus']))
+        ranked_all = sorted(rows, key=lambda r: float(r['vec_dist']) - float(r['keyword_bonus']))
 
         # Deduplicate: keep best-scored row per unique product name
         seen_names: dict = {}
-        for row in ranked:
+        for row in ranked_all:
             name = row['name']
             if name not in seen_names:
                 seen_names[name] = row
         ranked = list(seen_names.values())[:5]
+        dedup_removed = len(ranked_all) - len(seen_names)
 
         avg_dist = sum(float(r['vec_dist']) for r in ranked) / len(ranked)
         low_confidence = avg_dist > 0.6
-        rag_meta.update({"rag_confidence": round(avg_dist, 4), "rag_empty": False})
+        rag_meta.update({
+            "rag_confidence": round(avg_dist, 4), "rag_empty": False,
+            "dedup_removed_count": dedup_removed,
+            "unique_brands_count": len({row['brand'] for row in ranked}),
+            "unique_categories_count": len({row['category'] for row in ranked}),
+        })
 
         context_parts, sources = [], []
         for row in ranked:
@@ -758,6 +774,13 @@ async def chat_stream(request: ChatRequest):
         if is_wellbeing_message(request.message):
             yield f"data: {json.dumps({'token': WELLBEING_RESPONSE, 'done': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': False})}\n\n"
+            _we = {"session_id": session_id, "message_id": message_id,
+                   "timestamp": datetime.now(timezone.utc).isoformat(),
+                   "latency_ms": int((time.monotonic() - t0) * 1000),
+                   "turn_number": turn_number, "wellbeing_triggered": True,
+                   "is_unanswered": False, "llm_error": False}
+            _req_metrics.append(_we)
+            if len(_req_metrics) > 1000: _req_metrics.pop(0)
             return
 
         # Short-circuit: session ending — skip RAG, stream canned farewell
@@ -829,6 +852,14 @@ async def chat_stream(request: ChatRequest):
             "ttft_ms": ttft_ms,
             "tokens_in": tokens_in, "tokens_out": tokens_out,
             "estimated_cost_usd": round(cost, 8),
+            "wellbeing_triggered": False,
+            "dedup_removed_count": rag_meta.get("dedup_removed_count", 0),
+            "unique_brands_count": rag_meta.get("unique_brands_count", 0),
+            "unique_categories_count": rag_meta.get("unique_categories_count", 0),
+            "hallucination_flag": len(sources) > 0 and not any(
+                s.name.lower() in full_response.lower() for s in sources
+            ),
+            "context_pct": round(tokens_in / GEMINI_CONTEXT_LIMIT * 100, 1) if tokens_in else 0.0,
         }
         _req_metrics.append(m)
         if len(_req_metrics) > 1000:
@@ -970,7 +1001,43 @@ async def metrics_summary():
             cat: {**v, "unanswered_rate": f"{v['unanswered']/v['requests']*100:.1f}%"}
             for cat, v in sorted(cat_stats.items(), key=lambda x: -x[1]["requests"])
         },
+        "safety": {
+            "wellbeing_rate": pct([m for m in _req_metrics if m.get("wellbeing_triggered")]),
+            "hallucination_flag_rate": pct([m for m in _req_metrics if m.get("hallucination_flag")]),
+        },
+        "rag_quality": {
+            "avg_dedup_removed": round(sum(m.get("dedup_removed_count", 0) for m in _req_metrics) / n, 2),
+            "avg_unique_brands_per_response": round(sum(m.get("unique_brands_count", 0) for m in _req_metrics) / n, 2),
+            "avg_unique_categories_per_response": round(sum(m.get("unique_categories_count", 0) for m in _req_metrics) / n, 2),
+        },
+        "context_saturation": {
+            "avg_context_pct": round(sum(m.get("context_pct", 0) for m in _req_metrics) / n, 1),
+            "max_context_pct": max((m.get("context_pct", 0) for m in _req_metrics), default=0),
+        },
     }
+
+
+async def _log_event_to_bq(req: AnalyticsEventRequest):
+    if not GCP_PROJECT:
+        return
+    try:
+        bq = bigquery.Client(project=GCP_PROJECT)
+        bq.insert_rows_json(
+            f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_EVENTS_TABLE}",
+            [{"event_type": req.event_type, "session_id": req.session_id,
+              "message_id": req.message_id or "", "product_id": req.product_id or "",
+              "product_name": req.product_name or "",
+              "timestamp": datetime.now(timezone.utc).isoformat()}],
+        )
+    except Exception as e:
+        logger.error(f"Failed to log event to BigQuery: {e}")
+
+
+@app.post("/analytics/event")
+async def analytics_event(request: AnalyticsEventRequest):
+    """Log a frontend event (chip click, chatbot open, etc.) to BigQuery."""
+    asyncio.create_task(_log_event_to_bq(request))
+    return {"status": "ok"}
 
 
 @app.post("/review")

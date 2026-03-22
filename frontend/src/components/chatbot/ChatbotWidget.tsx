@@ -38,7 +38,12 @@ export function ChatbotWidget() {
   ])
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
-  const [sessionId, setSessionId] = useState(() => crypto.randomUUID())
+  const [sessionId, setSessionId] = useState(() => {
+    const existing = typeof window !== 'undefined' ? sessionStorage.getItem('chatSessionId') : null
+    const id = existing || crypto.randomUUID()
+    if (!existing && typeof window !== 'undefined') sessionStorage.setItem('chatSessionId', id)
+    return id
+  })
   const [sessionEnded, setSessionEnded] = useState(false)
   const [reviewSubmitted, setReviewSubmitted] = useState(false)
   const [hoveredStar, setHoveredStar] = useState(0)
@@ -155,17 +160,33 @@ export function ChatbotWidget() {
   }
 
   const startNewSession = () => {
+    const newId = crypto.randomUUID()
+    sessionStorage.setItem('chatSessionId', newId)
     setMessages([{
       id: '0',
       role: 'assistant',
       content: "Hi! I'm ShopRight's AI assistant. I can help you find products, answer questions about home improvement, and provide expert advice. How can I help you today?",
       timestamp: new Date(),
     }])
-    setSessionId(crypto.randomUUID())
+    setSessionId(newId)
     setSessionEnded(false)
     setReviewSubmitted(false)
     setHoveredStar(0)
     setInput('')
+  }
+
+  const trackChipClick = (source: ProductSource, messageId: string) => {
+    fetch(`${CHATBOT_URL}/analytics/event`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event_type: 'chip_click',
+        session_id: sessionId,
+        message_id: messageId,
+        product_id: source.id,
+        product_name: source.name,
+      }),
+    }).catch(() => { /* non-critical */ })
   }
 
   const submitReview = async (stars: number) => {
@@ -260,6 +281,7 @@ export function ChatbotWidget() {
                           href={`/products/${source.id}`}
                           target="_blank"
                           rel="noopener noreferrer"
+                          onClick={() => trackChipClick(source, msg.id)}
                           className="inline-flex items-center gap-1 text-xs bg-white border border-primary/30 text-primary rounded-full px-2.5 py-1 hover:bg-primary/5 transition-colors"
                         >
                           {source.name} · <span className="font-medium">${source.price.toFixed(2)}</span>

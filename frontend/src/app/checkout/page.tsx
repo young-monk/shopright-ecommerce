@@ -46,6 +46,7 @@ export default function CheckoutPage() {
     setError('')
     setSubmitting(true)
     try {
+      const chatSessionId = sessionStorage.getItem('chatSessionId') || undefined
       const { data } = await api.post('/orders', {
         user_id: 'guest',
         items: items.map(i => ({
@@ -55,6 +56,7 @@ export default function CheckoutPage() {
           price: i.price,
         })),
         shipping_address: address,
+        ...(chatSessionId && { chat_session_id: chatSessionId }),
       })
       clearCart()
       setOrderId(data.id)
