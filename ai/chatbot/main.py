@@ -801,9 +801,12 @@ async def chat_stream(request: ChatRequest):
         llm_ms = int((time.monotonic() - t_llm) * 1000)
 
         # Step 3: send final metadata event
+        # Only show chips for products Gemini actually named — avoids irrelevant RAG noise
+        mentioned = [s for s in sources if s.name.lower() in full_response.lower()]
+        final_sources = mentioned if mentioned else sources
         latency_ms = int((time.monotonic() - t0) * 1000)
-        is_unanswered = detect_unanswered(full_response, len(sources), history)
-        yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [s.model_dump() for s in sources], 'is_unanswered': is_unanswered, 'session_ending': False})}\n\n"
+        is_unanswered = detect_unanswered(full_response, len(final_sources), history)
+        yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [s.model_dump() for s in final_sources], 'is_unanswered': is_unanswered, 'session_ending': False})}\n\n"
 
         # Step 4: record metrics
         tokens_in  = metrics_ctx.get("tokens_in") or None
@@ -818,7 +821,7 @@ async def chat_stream(request: ChatRequest):
             "is_unanswered": is_unanswered,
             "llm_error": llm_error_type is not None,
             "llm_error_type": llm_error_type,
-            "sources_count": len(sources),
+            "sources_count": len(final_sources),
             "rag_confidence": rag_meta.get("rag_confidence"),
             "rag_empty": rag_meta.get("rag_empty"),
             "price_filter_used": rag_meta.get("price_filter_used", False),
@@ -850,7 +853,7 @@ async def chat_stream(request: ChatRequest):
         logger.info(f"[metrics] latency={latency_ms}ms embed={rag_meta.get('embed_ms')}ms db={rag_meta.get('db_ms')}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={_conf_str} model={embed_model_name()} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
 
         asyncio.create_task(log_to_bigquery(
-            session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered,
+            session_id, message_id, request.message, full_response, final_sources, latency_ms, is_unanswered,
             extra={k: v for k, v in m.items() if k not in ("session_id","message_id","timestamp","latency_ms","is_unanswered")},
         ))
 
@@ -872,13 +875,15 @@ async def chat(request: ChatRequest):
 
     contents = build_contents(request.message, history, context)
     response_text, latency_ms = await gemini_generate(contents, SYSTEM_PROMPT)
-    is_unanswered = detect_unanswered(response_text, len(sources), history)
+    mentioned = [s for s in sources if s.name.lower() in response_text.lower()]
+    final_sources = mentioned if mentioned else sources
+    is_unanswered = detect_unanswered(response_text, len(final_sources), history)
 
     asyncio.create_task(log_to_bigquery(
-        session_id, message_id, request.message, response_text, sources, latency_ms, is_unanswered
+        session_id, message_id, request.message, response_text, final_sources, latency_ms, is_unanswered
     ))
     return ChatResponse(response=response_text, session_id=session_id, message_id=message_id,
-                        sources=sources, is_unanswered=is_unanswered)
+                        sources=final_sources, is_unanswered=is_unanswered)
 
 
 @app.post("/feedback")
