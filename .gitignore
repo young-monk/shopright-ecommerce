@@ -31,3 +31,9 @@ gcp-credentials*.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code
+.claude/
+
+# TypeScript build cache
+frontend/tsconfig.tsbuildinfo
