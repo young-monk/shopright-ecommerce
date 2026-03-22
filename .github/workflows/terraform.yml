@@ -75,5 +75,11 @@ jobs:
             });
 
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && steps.plan.outcome == 'success'
         run: terraform apply -auto-approve tfplan
+
+      - name: Fail if plan failed
+        if: steps.plan.outcome == 'failure'
+        run: |
+          echo "::error::Terraform plan failed. The WIF service account may need roles/resourcemanager.projectIamAdmin to manage project IAM bindings."
+          exit 1
