@@ -480,7 +480,7 @@ def extract_price_limit(query: str) -> float | None:
     return None
 
 # ── RAG: Hybrid Vector + Keyword Search ──────────────────────────────────────
-async def get_relevant_context(query: str, top_k: int = 10, hyde_doc: str | None = None) -> tuple[str, list[ProductSource], dict]:
+async def get_relevant_context(query: str, top_k: int = 15, hyde_doc: str | None = None) -> tuple[str, list[ProductSource], dict]:
     # HyDE: if a pre-generated hypothetical doc is provided use it; otherwise generate one here
     if hyde_doc is None:
         hyde_doc = await generate_hypothetical_document(query)
@@ -582,8 +582,16 @@ async def get_relevant_context(query: str, top_k: int = 10, hyde_doc: str | None
             rag_meta.update({"rag_confidence": 0.0, "rag_empty": True})
             return "", [], rag_meta
 
-        # Re-rank: sort by combined score (vec_dist - keyword_bonus), take top 5 for context
-        ranked = sorted(rows, key=lambda r: float(r['vec_dist']) - float(r['keyword_bonus']))[:5]
+        # Re-rank: sort by combined score (vec_dist - keyword_bonus)
+        ranked = sorted(rows, key=lambda r: float(r['vec_dist']) - float(r['keyword_bonus']))
+
+        # Deduplicate: keep best-scored row per unique product name
+        seen_names: dict = {}
+        for row in ranked:
+            name = row['name']
+            if name not in seen_names:
+                seen_names[name] = row
+        ranked = list(seen_names.values())[:5]
 
         avg_dist = sum(float(r['vec_dist']) for r in ranked) / len(ranked)
         low_confidence = avg_dist > 0.6
