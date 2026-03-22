@@ -734,7 +734,9 @@ async def log_to_bigquery(session_id, message_id, user_message, assistant_respon
         if extra:
             row.update(extra)
         bq = bigquery.Client(project=GCP_PROJECT)
-        bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}", [row])
+        errors = bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}", [row])
+        if errors:
+            logger.error(f"BigQuery insert errors for {message_id}: {errors}")
     except Exception as e:
         logger.error(f"Failed to log to BigQuery: {e}")
 
@@ -798,8 +800,8 @@ async def chat_stream(request: ChatRequest):
         metrics_ctx: dict = {}
         was_rewritten = False
         rag_meta: dict = {}
-        hyde_ms = 0
-        rag_ms = 0
+        hyde_ms = None
+        rag_ms = None
         if is_product_query(request.message):
             search_query, was_rewritten = await rewrite_query(request.message, history)
 
@@ -812,7 +814,9 @@ async def chat_stream(request: ChatRequest):
             rag_ms = int((time.monotonic() - t_rag) * 1000)
         else:
             context, sources = "", []
-            rag_meta = {"rag_confidence": 0.0, "rag_empty": False, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
+            rag_meta = {"rag_confidence": None, "rag_empty": None, "price_filter_used": False,
+                        "price_filter_value": None, "detected_category": None, "hyde_used": False,
+                        "dedup_removed_count": None, "unique_brands_count": None, "unique_categories_count": None}
 
         # Step 2: stream LLM tokens
         contents = build_contents(request.message, history, context)
@@ -830,11 +834,11 @@ async def chat_stream(request: ChatRequest):
         yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [s.model_dump() for s in sources], 'is_unanswered': is_unanswered, 'session_ending': False})}\n\n"
 
         # Step 4: record metrics
-        tokens_in  = metrics_ctx.get("tokens_in", 0)
-        tokens_out = metrics_ctx.get("tokens_out", 0)
-        cost = (tokens_in / 1e6 * _COST_PER_1M_IN) + (tokens_out / 1e6 * _COST_PER_1M_OUT)
+        tokens_in  = metrics_ctx.get("tokens_in") or None
+        tokens_out = metrics_ctx.get("tokens_out") or None
+        cost = ((tokens_in or 0) / 1e6 * _COST_PER_1M_IN) + ((tokens_out or 0) / 1e6 * _COST_PER_1M_OUT)
         llm_error_type: str | None = metrics_ctx.get("llm_error_type")
-        ttft_ms = metrics_ctx.get("ttft_ms", 0)
+        ttft_ms = metrics_ctx.get("ttft_ms") or None
         m = {
             "session_id": session_id, "message_id": message_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -843,8 +847,8 @@ async def chat_stream(request: ChatRequest):
             "llm_error": llm_error_type is not None,
             "llm_error_type": llm_error_type,
             "sources_count": len(sources),
-            "rag_confidence": rag_meta.get("rag_confidence", 0.0),
-            "rag_empty": rag_meta.get("rag_empty", False),
+            "rag_confidence": rag_meta.get("rag_confidence"),
+            "rag_empty": rag_meta.get("rag_empty"),
             "price_filter_used": rag_meta.get("price_filter_used", False),
             "price_filter_value": rag_meta.get("price_filter_value"),
             "detected_category": rag_meta.get("detected_category"),
@@ -855,20 +859,22 @@ async def chat_stream(request: ChatRequest):
             "llm_ms": llm_ms,
             "ttft_ms": ttft_ms,
             "tokens_in": tokens_in, "tokens_out": tokens_out,
-            "estimated_cost_usd": round(cost, 8),
+            "estimated_cost_usd": round(cost, 8) if cost else None,
             "wellbeing_triggered": False,
-            "dedup_removed_count": rag_meta.get("dedup_removed_count", 0),
-            "unique_brands_count": rag_meta.get("unique_brands_count", 0),
-            "unique_categories_count": rag_meta.get("unique_categories_count", 0),
-            "hallucination_flag": len(sources) > 0 and not any(
+            "dedup_removed_count": rag_meta.get("dedup_removed_count"),
+            "unique_brands_count": rag_meta.get("unique_brands_count"),
+            "unique_categories_count": rag_meta.get("unique_categories_count"),
+            "hallucination_flag": (len(sources) > 0 and not any(
                 s.name.lower() in full_response.lower() for s in sources
-            ),
-            "context_pct": round(tokens_in / GEMINI_CONTEXT_LIMIT * 100, 1) if tokens_in else 0.0,
+            )) if sources else None,
+            "context_pct": round(tokens_in / GEMINI_CONTEXT_LIMIT * 100, 1) if tokens_in else None,
         }
         _req_metrics.append(m)
         if len(_req_metrics) > 1000:
             _req_metrics.pop(0)
-        logger.info(f"[metrics] latency={latency_ms}ms hyde={hyde_ms}ms rag={rag_ms}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={rag_meta.get('rag_confidence',0):.3f} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
+        _conf = rag_meta.get('rag_confidence')
+        _conf_str = f"{_conf:.3f}" if _conf is not None else "N/A"
+        logger.info(f"[metrics] latency={latency_ms}ms hyde={hyde_ms}ms rag={rag_ms}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={_conf_str} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
 
         asyncio.create_task(log_to_bigquery(
             session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered,
