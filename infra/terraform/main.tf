@@ -335,6 +335,10 @@ resource "google_cloud_run_v2_service" "frontend" {
         name  = "CHATBOT_SERVICE_URL"
         value = google_cloud_run_v2_service.chatbot.uri
       }
+      env {
+        name  = "ANALYTICS_SERVICE_URL"
+        value = google_cloud_run_v2_service.analytics.uri
+      }
       resources {
         limits = { cpu = "1", memory = "1Gi" }
       }
@@ -527,6 +531,56 @@ resource "google_storage_bucket_iam_member" "assets_public" {
   bucket = google_storage_bucket.assets.name
   role   = "roles/storage.objectViewer"
   member = "allUsers"
+}
+
+# ── Cloud Run: Analytics Service ──────────────────────────────────────────────
+resource "google_service_account" "analytics_sa" {
+  account_id   = "shopright-analytics"
+  display_name = "ShopRight Analytics Service Account"
+}
+
+resource "google_project_iam_member" "analytics_bigquery" {
+  project = var.project_id
+  role    = "roles/bigquery.dataViewer"
+  member  = "serviceAccount:${google_service_account.analytics_sa.email}"
+}
+
+resource "google_project_iam_member" "analytics_bigquery_job" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.analytics_sa.email}"
+}
+
+resource "google_cloud_run_v2_service" "analytics" {
+  name     = "analytics"
+  location = var.region
+
+  template {
+    service_account = google_service_account.analytics_sa.email
+    containers {
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics:latest"
+      ports { container_port = 8005 }
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      env {
+        name  = "BIGQUERY_DATASET"
+        value = "chat_analytics"
+      }
+      resources {
+        limits = { cpu = "1", memory = "512Mi" }
+      }
+    }
+  }
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_cloud_run_service_iam_member" "analytics_public" {
+  service  = google_cloud_run_v2_service.analytics.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "allUsers"
 }
 
 # ── Service Account for Chatbot ───────────────────────────────────────────────

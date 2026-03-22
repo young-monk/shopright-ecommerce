@@ -48,6 +48,11 @@ jobs:
             image: chatbot
             cloud_run_name: chatbot-service
             port: 8004
+          - service: analytics
+            context: ai/analytics
+            image: analytics
+            cloud_run_name: analytics
+            port: 8005
 
     steps:
       - uses: actions/checkout@v4
@@ -66,18 +71,8 @@ jobs:
       - name: Build and push
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/shopright/${{ matrix.image }}
-          API_URL: ${{ secrets.API_URL }}
-          CHATBOT_URL: ${{ secrets.CHATBOT_URL }}
         run: |
-          if [ "${{ matrix.service }}" = "frontend" ]; then
-            docker build \
-              --build-arg NEXT_PUBLIC_API_URL=$API_URL \
-              --build-arg NEXT_PUBLIC_CHATBOT_URL=$CHATBOT_URL \
-              -t $IMAGE:${{ github.sha }} -t $IMAGE:latest \
-              ${{ matrix.context }}
-          else
-            docker build -t $IMAGE:${{ github.sha }} -t $IMAGE:latest ${{ matrix.context }}
-          fi
+          docker build -t $IMAGE:${{ github.sha }} -t $IMAGE:latest ${{ matrix.context }}
           docker push $IMAGE:${{ github.sha }}
           docker push $IMAGE:latest
 
@@ -103,6 +98,8 @@ jobs:
             cloud_run_name: user-service
           - image: chatbot
             cloud_run_name: chatbot-service
+          - image: analytics
+            cloud_run_name: analytics
 
     steps:
       - id: auth
