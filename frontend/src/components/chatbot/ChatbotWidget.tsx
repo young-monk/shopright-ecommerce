@@ -21,6 +21,7 @@ interface Message {
   isUnanswered?: boolean
   rating?: 1 | -1
   userMessage?: string
+  streaming?: boolean
 }
 
 export function ChatbotWidget() {
@@ -56,42 +57,83 @@ export function ChatbotWidget() {
     setInput('')
     setIsLoading(true)
 
+    // Add empty assistant message to stream into
+    const streamingId = crypto.randomUUID()
+    setMessages(prev => [...prev, {
+      id: streamingId,
+      role: 'assistant',
+      content: '',
+      timestamp: new Date(),
+      streaming: true,
+    }])
+
     try {
-      const response = await axios.post(`${CHATBOT_URL}/chat`, {
-        message: userText,
-        session_id: sessionId,
-        history: messages.slice(-6).map(m => ({ role: m.role, content: m.content })),
+      const response = await fetch(`${CHATBOT_URL}/chat/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: userText,
+          session_id: sessionId,
+          history: messages.slice(-6).map(m => ({ role: m.role, content: m.content })),
+        }),
       })
 
-      const assistantMessage: Message = {
-        id: response.data.message_id,
-        role: 'assistant',
-        content: response.data.response,
-        sources: response.data.sources,
-        timestamp: new Date(),
-        isUnanswered: response.data.is_unanswered,
-        userMessage: userText,
+      if (!response.ok || !response.body) throw new Error('Stream failed')
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.done) {
+              // Final event — patch in metadata
+              setMessages(prev => prev.map(m =>
+                m.id === streamingId
+                  ? {
+                      ...m,
+                      id: data.message_id,
+                      sources: data.sources,
+                      isUnanswered: data.is_unanswered,
+                      userMessage: userText,
+                      streaming: false,
+                    }
+                  : m
+              ))
+            } else {
+              // Token chunk — append to content
+              setMessages(prev => prev.map(m =>
+                m.id === streamingId ? { ...m, content: m.content + data.token } : m
+              ))
+            }
+          } catch {
+            // malformed chunk — ignore
+          }
+        }
       }
-      setMessages(prev => [...prev, assistantMessage])
     } catch {
-      setMessages(prev => [
-        ...prev,
-        {
-          id: crypto.randomUUID(),
-          role: 'assistant',
-          content: 'Sorry, I encountered an error. Please try again.',
-          timestamp: new Date(),
-        },
-      ])
+      setMessages(prev => prev.map(m =>
+        m.id === streamingId
+          ? { ...m, content: 'Sorry, I encountered an error. Please try again.', streaming: false }
+          : m
+      ))
     } finally {
       setIsLoading(false)
     }
   }
 
   const submitRating = async (msg: Message, rating: 1 | -1) => {
-    setMessages(prev =>
-      prev.map(m => (m.id === msg.id ? { ...m, rating } : m))
-    )
+    setMessages(prev => prev.map(m => (m.id === msg.id ? { ...m, rating } : m)))
     try {
       await axios.post(`${CHATBOT_URL}/feedback`, {
         message_id: msg.id,
@@ -145,26 +187,36 @@ export function ChatbotWidget() {
                   >
                     {msg.role === 'user' ? (
                       <p>{msg.content}</p>
+                    ) : msg.content ? (
+                      <>
+                        <ReactMarkdown
+                          components={{
+                            p: ({ children }) => <p className="mb-1 last:mb-0">{children}</p>,
+                            ul: ({ children }) => <ul className="list-disc pl-4 space-y-0.5 my-1">{children}</ul>,
+                            ol: ({ children }) => <ol className="list-decimal pl-4 space-y-0.5 my-1">{children}</ol>,
+                            li: ({ children }) => <li className="text-sm">{children}</li>,
+                            strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
+                            table: ({ children }) => <table className="text-xs border-collapse w-full my-1">{children}</table>,
+                            th: ({ children }) => <th className="border border-gray-300 px-2 py-1 bg-gray-200 text-left">{children}</th>,
+                            td: ({ children }) => <td className="border border-gray-300 px-2 py-1">{children}</td>,
+                          }}
+                        >
+                          {msg.content}
+                        </ReactMarkdown>
+                        {msg.streaming && (
+                          <span className="inline-block w-1.5 h-3.5 bg-gray-500 ml-0.5 animate-pulse rounded-sm" />
+                        )}
+                      </>
                     ) : (
-                      <ReactMarkdown
-                        components={{
-                          p: ({ children }) => <p className="mb-1 last:mb-0">{children}</p>,
-                          ul: ({ children }) => <ul className="list-disc pl-4 space-y-0.5 my-1">{children}</ul>,
-                          ol: ({ children }) => <ol className="list-decimal pl-4 space-y-0.5 my-1">{children}</ol>,
-                          li: ({ children }) => <li className="text-sm">{children}</li>,
-                          strong: ({ children }) => <strong className="font-semibold">{children}</strong>,
-                        }}
-                      >
-                        {msg.content}
-                      </ReactMarkdown>
+                      <Loader2 size={14} className="animate-spin text-gray-400" />
                     )}
                     {msg.isUnanswered && (
-                      <p className="text-xs text-amber-600 mt-1">
-                        ⚠ Couldn't find a match in our catalog
-                      </p>
+                      <p className="text-xs text-amber-600 mt-1">⚠ Couldn't find a match in our catalog</p>
                     )}
                   </div>
-                  {msg.sources && msg.sources.length > 0 && (
+
+                  {/* Product chips */}
+                  {!msg.streaming && msg.sources && msg.sources.length > 0 && (
                     <div className="flex flex-wrap gap-1.5 mt-1.5 pl-1">
                       {msg.sources.map(source => (
                         <a
@@ -179,23 +231,20 @@ export function ChatbotWidget() {
                       ))}
                     </div>
                   )}
-                  {/* Rating buttons — only on assistant messages (not the greeting) */}
-                  {msg.role === 'assistant' && msg.id !== '0' && (
+
+                  {/* Rating buttons */}
+                  {msg.role === 'assistant' && msg.id !== '0' && !msg.streaming && (
                     <div className="flex gap-1 pl-1">
                       <button
                         onClick={() => submitRating(msg, 1)}
-                        className={`p-1 rounded transition-colors ${
-                          msg.rating === 1 ? 'text-green-600' : 'text-gray-400 hover:text-green-600'
-                        }`}
+                        className={`p-1 rounded transition-colors ${msg.rating === 1 ? 'text-green-600' : 'text-gray-400 hover:text-green-600'}`}
                         title="Helpful"
                       >
                         <ThumbsUp size={13} />
                       </button>
                       <button
                         onClick={() => submitRating(msg, -1)}
-                        className={`p-1 rounded transition-colors ${
-                          msg.rating === -1 ? 'text-red-500' : 'text-gray-400 hover:text-red-500'
-                        }`}
+                        className={`p-1 rounded transition-colors ${msg.rating === -1 ? 'text-red-500' : 'text-gray-400 hover:text-red-500'}`}
                         title="Not helpful"
                       >
                         <ThumbsDown size={13} />
@@ -205,13 +254,6 @@ export function ChatbotWidget() {
                 </div>
               </div>
             ))}
-            {isLoading && (
-              <div className="flex justify-start">
-                <div className="bg-gray-100 rounded-lg px-3 py-2">
-                  <Loader2 size={16} className="animate-spin text-primary" />
-                </div>
-              </div>
-            )}
             <div ref={messagesEndRef} />
           </div>
 
@@ -225,13 +267,14 @@ export function ChatbotWidget() {
                 onKeyDown={e => e.key === 'Enter' && sendMessage()}
                 placeholder="Ask me anything..."
                 className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                disabled={isLoading}
               />
               <button
                 onClick={sendMessage}
                 disabled={!input.trim() || isLoading}
                 className="bg-primary hover:bg-primary-dark text-white rounded-lg p-2 disabled:opacity-50 transition-colors"
               >
-                <Send size={16} />
+                {isLoading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
               </button>
             </div>
           </div>
