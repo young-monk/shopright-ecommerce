@@ -30,6 +30,8 @@ import asyncio
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+from embed import embed as local_embed, preload as preload_embed
+
 # ── Config ───────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GCP_PROJECT    = os.getenv("GCP_PROJECT_ID", "")
@@ -112,6 +114,15 @@ CATEGORY_KEYWORDS: dict[str, list[str]] = {
 }
 
 app = FastAPI(title="ShopRight Chatbot", version="2.0.0")
+
+
+@app.on_event("startup")
+async def startup():
+    """Preload the embedding model so the first request isn't slow."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, preload_embed)
+
+
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
@@ -490,15 +501,11 @@ def extract_price_limit(query: str) -> float | None:
     return None
 
 # ── RAG: Hybrid Vector + Keyword Search ──────────────────────────────────────
-async def get_relevant_context(query: str, top_k: int = 15, hyde_doc: str | None = None) -> tuple[str, list[ProductSource], dict]:
-    # HyDE: if a pre-generated hypothetical doc is provided use it; otherwise generate one here
-    if hyde_doc is None:
-        hyde_doc = await generate_hypothetical_document(query)
-    hyde_used = hyde_doc != query
-    # Use RETRIEVAL_DOCUMENT so the vector lives in the same space as indexed products
-    vector = await gemini_embed(hyde_doc, task_type="RETRIEVAL_DOCUMENT")
+async def get_relevant_context(query: str, top_k: int = 15) -> tuple[str, list[ProductSource], dict]:
+    # Embed the query locally — no API call, ~10-20ms on CPU
+    vector = await local_embed(query)
     if not vector:
-        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
+        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
 
     detected_category = detect_category(query)
     price_limit = extract_price_limit(query)
@@ -805,12 +812,8 @@ async def chat_stream(request: ChatRequest):
         if is_product_query(request.message):
             search_query, was_rewritten = await rewrite_query(request.message, history)
 
-            t_hyde = time.monotonic()
-            hyde_doc = await generate_hypothetical_document(search_query)
-            hyde_ms = int((time.monotonic() - t_hyde) * 1000)
-
             t_rag = time.monotonic()
-            context, sources, rag_meta = await get_relevant_context(search_query, hyde_doc=hyde_doc)
+            context, sources, rag_meta = await get_relevant_context(search_query)
             rag_ms = int((time.monotonic() - t_rag) * 1000)
         else:
             context, sources = "", []
