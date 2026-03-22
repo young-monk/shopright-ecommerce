@@ -184,7 +184,7 @@ async def gemini_stream(contents: list, system_prompt: str):
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 1024},
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 2048},
     }
     async with httpx.AsyncClient(timeout=60) as client:
         async with client.stream("POST", url, json=payload) as response:
@@ -448,7 +448,7 @@ When product catalog context is provided:
 4. Mention compatibility or safety considerations when relevant.
 
 ## Comparisons
-When the user asks to compare products or uses "vs", "versus", "which is better", format your response as a markdown table with columns: Product | Price | Best For.
+When the user asks to compare products or uses "vs", "versus", "which is better", format your response as a compact markdown table with columns: Product | Price | Best For. Keep each cell under 8 words. Use short separators (e.g. |---|---|---|). Do not pad or align columns.
 
 ## Pricing guidance
 - Always show prices when available.
