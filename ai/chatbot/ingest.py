@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import time
+import uuid
 from datetime import date
 from pathlib import Path
 
@@ -225,10 +226,11 @@ async def ingest_reviews(conn: asyncpg.Connection) -> tuple[int, int]:
                 await conn.execute(
                     """
                     INSERT INTO product_reviews
-                        (product_id, sku, stars, title, body, author, review_date, verified)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                        (id, product_id, sku, stars, title, body, author, review_date, verified)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     ON CONFLICT DO NOTHING
                     """,
+                    uuid.uuid4(),
                     product_id,
                     sku,
                     int(rev.get("stars", 3)),
