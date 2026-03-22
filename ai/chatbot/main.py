@@ -476,7 +476,7 @@ async def _ensure_session(session_id: str, history: list[ChatMessage]) -> None:
                     event=type("SeedEvent", (), {
                         "author": "user" if role == "user" else _agent.name,
                         "content": seed_content,
-                        "actions": type("Actions", (), {"state_delta": {}, "artifact_delta": {}})(),
+                        "actions": type("Actions", (), {"state_delta": {}, "artifact_delta": {}, "agent_state": {}})(),
                         "id": str(uuid.uuid4()),
                         "timestamp": time.time(),
                         "partial": False,
