@@ -415,7 +415,6 @@ resource "google_bigquery_table" "chat_logs" {
     { name = "response_length",         type = "INTEGER",   mode = "NULLABLE" },
     # Performance
     { name = "latency_ms",              type = "INTEGER",   mode = "NULLABLE" },
-    { name = "hyde_ms",                 type = "INTEGER",   mode = "NULLABLE" },
     { name = "rag_ms",                  type = "INTEGER",   mode = "NULLABLE" },
     { name = "llm_ms",                  type = "INTEGER",   mode = "NULLABLE" },
     { name = "ttft_ms",                 type = "INTEGER",   mode = "NULLABLE" },
@@ -432,7 +431,6 @@ resource "google_bigquery_table" "chat_logs" {
     { name = "detected_category",       type = "STRING",    mode = "NULLABLE" },
     { name = "price_filter_used",       type = "BOOLEAN",   mode = "NULLABLE" },
     { name = "price_filter_value",      type = "FLOAT",     mode = "NULLABLE" },
-    { name = "hyde_used",               type = "BOOLEAN",   mode = "NULLABLE" },
     { name = "query_rewritten",         type = "BOOLEAN",   mode = "NULLABLE" },
     { name = "dedup_removed_count",     type = "INTEGER",   mode = "NULLABLE" },
     { name = "unique_brands_count",     type = "INTEGER",   mode = "NULLABLE" },

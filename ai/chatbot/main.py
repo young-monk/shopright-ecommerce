@@ -445,40 +445,6 @@ def detect_category(query: str) -> str | None:
             return category
     return None
 
-# ── HyDE: Hypothetical Document Embedding ────────────────────────────────────
-async def generate_hypothetical_document(query: str) -> str:
-    """
-    HyDE: ask Gemini to write a short hypothetical product description that
-    would answer the query, then embed *that* instead of the raw query.
-    Product descriptions live in a different vector space than questions —
-    HyDE bridges the gap and consistently improves retrieval confidence.
-    Falls back to the raw query on any error.
-    """
-    if not GEMINI_API_KEY:
-        return query
-    prompt = (
-        f"Write a 2-sentence product description (max 50 words) for a home improvement "
-        f"product that would perfectly answer this customer query: \"{query}\"\n\n"
-        f"Output only the product description, no preamble or explanation:"
-    )
-    url = f"{GEMINI_BASE}/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 80, "thinkingConfig": {"thinkingBudget": 0}},
-    }
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            resp = await client.post(url, json=payload)
-            if resp.status_code == 200:
-                parts = resp.json()["candidates"][0]["content"]["parts"]
-                text = next((p["text"] for p in parts if "text" in p), None)
-                if text:
-                    logger.info(f"HyDE: '{query[:60]}' → '{text.strip()[:80]}'")
-                    return text.strip()
-    except Exception as e:
-        logger.warning(f"HyDE failed, falling back to raw query: {e}")
-    return query
-
 # ── Price extraction ──────────────────────────────────────────────────────────
 _PRICE_PATTERNS = [
     r'under\s*\$?(\d+(?:\.\d+)?)',
@@ -505,7 +471,7 @@ async def get_relevant_context(query: str, top_k: int = 15) -> tuple[str, list[P
     # Embed the query locally — no API call, ~10-20ms on CPU
     vector = await local_embed(query)
     if not vector:
-        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
+        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
 
     detected_category = detect_category(query)
     price_limit = extract_price_limit(query)
@@ -593,7 +559,7 @@ async def get_relevant_context(query: str, top_k: int = 15) -> tuple[str, list[P
 
         await conn.close()
 
-        rag_meta = {"price_filter_used": price_limit is not None, "price_filter_value": price_limit, "detected_category": detected_category, "hyde_used": hyde_used}
+        rag_meta = {"price_filter_used": price_limit is not None, "price_filter_value": price_limit, "detected_category": detected_category}
 
         if not rows:
             rag_meta.update({"rag_confidence": 0.0, "rag_empty": True})
@@ -639,7 +605,7 @@ async def get_relevant_context(query: str, top_k: int = 15) -> tuple[str, list[P
 
     except Exception as e:
         logger.warning(f"RAG retrieval failed: {e}")
-        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None, "hyde_used": False}
+        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
 
 # ── Unanswered detection ──────────────────────────────────────────────────────
 def detect_unanswered(response: str, sources_count: int, history: List[ChatMessage]) -> bool:
@@ -803,11 +769,10 @@ async def chat_stream(request: ChatRequest):
             yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': True})}\n\n"
             return
 
-        # Step 1: rewrite follow-ups, then HyDE + RAG (timed separately)
+        # Step 1: rewrite follow-ups, then embed + RAG
         metrics_ctx: dict = {}
         was_rewritten = False
         rag_meta: dict = {}
-        hyde_ms = None
         rag_ms = None
         if is_product_query(request.message):
             search_query, was_rewritten = await rewrite_query(request.message, history)
@@ -818,7 +783,7 @@ async def chat_stream(request: ChatRequest):
         else:
             context, sources = "", []
             rag_meta = {"rag_confidence": None, "rag_empty": None, "price_filter_used": False,
-                        "price_filter_value": None, "detected_category": None, "hyde_used": False,
+                        "price_filter_value": None, "detected_category": None,
                         "dedup_removed_count": None, "unique_brands_count": None, "unique_categories_count": None}
 
         # Step 2: stream LLM tokens
@@ -856,8 +821,6 @@ async def chat_stream(request: ChatRequest):
             "price_filter_value": rag_meta.get("price_filter_value"),
             "detected_category": rag_meta.get("detected_category"),
             "query_rewritten": was_rewritten,
-            "hyde_used": rag_meta.get("hyde_used", False),
-            "hyde_ms": hyde_ms,
             "rag_ms": rag_ms,
             "llm_ms": llm_ms,
             "ttft_ms": ttft_ms,
@@ -877,7 +840,7 @@ async def chat_stream(request: ChatRequest):
             _req_metrics.pop(0)
         _conf = rag_meta.get('rag_confidence')
         _conf_str = f"{_conf:.3f}" if _conf is not None else "N/A"
-        logger.info(f"[metrics] latency={latency_ms}ms hyde={hyde_ms}ms rag={rag_ms}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={_conf_str} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
+        logger.info(f"[metrics] latency={latency_ms}ms rag={rag_ms}ms llm={llm_ms}ms ttft={ttft_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={_conf_str} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
 
         asyncio.create_task(log_to_bigquery(
             session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered,
@@ -937,7 +900,6 @@ async def metrics_summary():
     rag_empty  = [m for m in _req_metrics if m.get("rag_empty")]
 
     # Per-step timing lists (only requests where the step ran)
-    hyde_times = sorted(m["hyde_ms"] for m in _req_metrics if m.get("hyde_ms"))
     rag_times  = sorted(m["rag_ms"]  for m in _req_metrics if m.get("rag_ms"))
     llm_times  = sorted(m["llm_ms"]  for m in _req_metrics if m.get("llm_ms"))
     ttft_times = sorted(m["ttft_ms"] for m in _req_metrics if m.get("ttft_ms"))
@@ -983,8 +945,6 @@ async def metrics_summary():
             "avg_ms": int(sum(latencies) / n),
         },
         "step_timings": {
-            "hyde_avg_ms":  avg(hyde_times),
-            "hyde_p95_ms":  p(hyde_times, 95),
             "rag_avg_ms":   avg(rag_times),
             "rag_p95_ms":   p(rag_times, 95),
             "llm_avg_ms":   avg(llm_times),
@@ -997,7 +957,6 @@ async def metrics_summary():
             "empty_results_rate": pct(rag_empty),
             "price_filter_usage_rate": pct(price_filtered),
             "query_rewrite_rate": pct(rewritten),
-            "hyde_usage_rate": pct([m for m in _req_metrics if m.get("hyde_used")]),
         },
         "tokens": {
             "avg_input":  int(sum(tokens_in)/len(tokens_in))   if tokens_in  else 0,
@@ -1084,7 +1043,7 @@ async def ingest_products():
     for product in products:
         specs = product['specifications'] or ""
         # Rich document text — written like a product description a customer would read,
-        # so HyDE-generated hypothetical descriptions match this space closely
+        # written like a product description to match the embedding model's training distribution
         text = (
             f"{product['name']} by {product['brand']}. "
             f"Category: {product['category']}. "
