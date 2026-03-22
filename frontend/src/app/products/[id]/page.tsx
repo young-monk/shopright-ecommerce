@@ -4,6 +4,7 @@ import { useParams, useRouter } from 'next/navigation'
 import Image from 'next/image'
 import { Star, ShoppingCart, ArrowLeft } from 'lucide-react'
 import { Navbar } from '@/components/layout/Navbar'
+import { ProductReviews } from '@/components/products/ProductReviews'
 import { useCartStore } from '@/store/cartStore'
 import { api } from '@/lib/api'
 import toast from 'react-hot-toast'
@@ -90,6 +91,7 @@ export default function ProductDetailPage() {
         )}
 
         {product && !loading && (
+          <>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <div className="relative h-96 bg-white rounded-lg border">
               <Image
@@ -158,6 +160,10 @@ export default function ProductDetailPage() {
               )}
             </div>
           </div>
+
+          {/* Customer reviews section */}
+          <ProductReviews productId={product.id} />
+          </>
         )}
       </div>
     </main>

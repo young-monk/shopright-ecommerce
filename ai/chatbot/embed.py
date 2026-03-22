@@ -1,67 +1,51 @@
 """
-Local embedding module — replaces Gemini embedding API calls.
+Embedding module — uses Google Gemini embedding API (gemini-embedding-001).
 
-Uses sentence-transformers with multi-qa-mpnet-base-dot-v1 as the base model
-(768 dims, pre-trained on QA pairs, matches existing pgvector index).
-
-After fine-tuning with finetune/train.py, set LOCAL_EMBED_MODEL env var to
-point at the fine-tuned model directory and it will be loaded automatically.
-
-Inference: ~10-20ms on CPU vs ~150ms for the Gemini API call.
+Native 3072-dimensional output, no truncation needed.
+Task types: RETRIEVAL_DOCUMENT (ingest) vs RETRIEVAL_QUERY (search).
 """
 import os
 import time
 import asyncio
 import logging
+import httpx
 
 logger = logging.getLogger(__name__)
 
-# Fine-tuned model takes priority; falls back to the base model.
-_MODEL_DIR = os.getenv("LOCAL_EMBED_MODEL", "./models/shopright-embed")
-_BASE_MODEL = "multi-qa-mpnet-base-dot-v1"
-
-_model = None
-_model_name: str = ""  # set once on load, read by model_name()
-
-
-def _load():
-    global _model, _model_name
-    if _model is not None:
-        return
-    from sentence_transformers import SentenceTransformer
-    if os.path.exists(_MODEL_DIR):
-        logger.info(f"[embed] Loading fine-tuned model from {_MODEL_DIR}")
-        _model = SentenceTransformer(_MODEL_DIR)
-        _model_name = os.path.basename(os.path.abspath(_MODEL_DIR))
-    else:
-        logger.info(f"[embed] Fine-tuned model not found at {_MODEL_DIR}, using base: {_BASE_MODEL}")
-        _model = SentenceTransformer(_BASE_MODEL)
-        _model_name = _BASE_MODEL
-    logger.info(f"[embed] Model ready — name={_model_name} dim={_model.get_sentence_embedding_dimension()}")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+_EMBED_MODEL = "gemini-embedding-001"
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
 def model_name() -> str:
-    """Return the name of the currently loaded model."""
-    _load()
-    return _model_name
+    return _EMBED_MODEL
 
 
-def embed_sync(text: str) -> tuple[list[float], int]:
-    """Synchronous embed. Returns (vector, embed_ms)."""
-    _load()
+def embed_sync(text: str, task_type: str = "RETRIEVAL_QUERY") -> tuple[list[float], int]:
+    """Synchronous embed via Gemini REST API. Returns (vector, embed_ms)."""
     t0 = time.monotonic()
-    vec = _model.encode(text, normalize_embeddings=True, show_progress_bar=False)
+    url = f"{_GEMINI_BASE}/models/{_EMBED_MODEL}:embedContent?key={GEMINI_API_KEY}"
+    payload = {
+        "model": f"models/{_EMBED_MODEL}",
+        "content": {"parts": [{"text": text}]},
+        "taskType": task_type,
+    }
+    with httpx.Client(timeout=15) as client:
+        resp = client.post(url, json=payload)
     embed_ms = int((time.monotonic() - t0) * 1000)
-    return vec.tolist(), embed_ms
+    if resp.status_code == 200:
+        vec = resp.json()["embedding"]["values"]
+        return vec, embed_ms
+    logger.warning(f"[embed] Gemini embed error {resp.status_code}: {resp.text[:200]}")
+    return [], embed_ms
 
 
-async def embed(text: str) -> tuple[list[float], int]:
-    """Async embed — runs inference in a thread so it doesn't block the event loop.
-    Returns (vector, embed_ms)."""
+async def embed(text: str, task_type: str = "RETRIEVAL_QUERY") -> tuple[list[float], int]:
+    """Async embed — delegates to sync version in a thread pool."""
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, embed_sync, text)
+    return await loop.run_in_executor(None, embed_sync, text, task_type)
 
 
 def preload():
-    """Call once at startup to load the model before the first request."""
-    _load()
+    """No-op: Gemini API has no warm-up cost. Kept for API compatibility."""
+    logger.info(f"[embed] Using Gemini API model: {_EMBED_MODEL} (3072 dims)")

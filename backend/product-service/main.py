@@ -2,11 +2,12 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Float, Integer, Boolean, Text, select, and_, func
+from sqlalchemy import String, Float, Integer, Boolean, Text, SmallInteger, Date, select, and_, func
 from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from pydantic import BaseModel, field_serializer
 from typing import Optional, List
 from uuid import UUID
+from datetime import date
 import os, uuid
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://shopright:shopright_dev@localhost:5432/shopright")
@@ -33,6 +34,37 @@ class Product(Base):
     image_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
     specifications: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON string
+
+class ProductReview(Base):
+    __tablename__ = "product_reviews"
+    id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    product_id: Mapped[uuid.UUID] = mapped_column(PGUUID(as_uuid=True), nullable=True)
+    sku: Mapped[str] = mapped_column(String, nullable=False)
+    stars: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    title: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    author: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    review_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    verified: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class ReviewResponse(BaseModel):
+    id: str
+    product_id: Optional[str]
+    sku: str
+    stars: int
+    title: Optional[str]
+    body: Optional[str]
+    author: Optional[str]
+    review_date: Optional[date]
+    verified: bool
+
+    model_config = {"from_attributes": True}
+
+    @field_serializer("id", "product_id")
+    def serialize_uuid(self, v) -> Optional[str]:
+        return str(v) if v else None
+
 
 class ProductCreate(BaseModel):
     sku: str
@@ -158,3 +190,55 @@ async def delete_product(product_id: str, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Product not found")
     await db.delete(product)
     await db.commit()
+
+
+@app.get("/products/{product_id}/reviews")
+async def get_product_reviews(
+    product_id: str,
+    limit: int = Query(default=10, le=50),
+    offset: int = 0,
+    sort: str = Query(default="recent", pattern="^(recent|highest|lowest)$"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return paginated reviews for a product."""
+    # Verify product exists
+    prod_result = await db.execute(select(Product).where(Product.id == product_id))
+    if not prod_result.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    order_col = {
+        "recent":  ProductReview.review_date.desc().nulls_last(),
+        "highest": ProductReview.stars.desc(),
+        "lowest":  ProductReview.stars.asc(),
+    }[sort]
+
+    count_result = await db.execute(
+        select(func.count()).select_from(ProductReview).where(ProductReview.product_id == product_id)
+    )
+    total = count_result.scalar_one()
+
+    result = await db.execute(
+        select(ProductReview)
+        .where(ProductReview.product_id == product_id)
+        .order_by(order_col)
+        .offset(offset)
+        .limit(limit)
+    )
+    reviews = result.scalars().all()
+
+    # Compute star distribution
+    dist_result = await db.execute(
+        select(ProductReview.stars, func.count().label("cnt"))
+        .where(ProductReview.product_id == product_id)
+        .group_by(ProductReview.stars)
+    )
+    distribution = {row.stars: row.cnt for row in dist_result}
+
+    return {
+        "reviews": [ReviewResponse.model_validate(r) for r in reviews],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "pages": -(-total // limit) if total else 0,
+        "star_distribution": {str(i): distribution.get(i, 0) for i in range(1, 6)},
+    }
