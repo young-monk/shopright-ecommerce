@@ -32,3 +32,9 @@ variable "jwt_secret" {
   type        = string
   sensitive   = true
 }
+
+variable "allowed_origins" {
+  description = "Comma-separated CORS origins for the API gateway (set to frontend Cloud Run URL after first deploy)"
+  type        = string
+  default     = "*"
+}

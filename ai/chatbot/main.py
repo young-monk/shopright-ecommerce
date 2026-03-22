@@ -1045,9 +1045,6 @@ async def review(request: ReviewRequest):
 
 @app.post("/embeddings/ingest")
 async def ingest_products():
-    if not GEMINI_API_KEY:
-        return {"message": "GEMINI_API_KEY not configured, skipping ingestion"}
-
     conn = await asyncpg.connect(DATABASE_URL)
     products = await conn.fetch(
         "SELECT id, name, description, category, brand, price, specifications FROM products"
@@ -1056,7 +1053,7 @@ async def ingest_products():
     for product in products:
         specs = product['specifications'] or ""
         # Rich document text — written like a product description a customer would read,
-        # written like a product description to match the embedding model's training distribution
+        # matches the embedding model's training distribution
         text = (
             f"{product['name']} by {product['brand']}. "
             f"Category: {product['category']}. "
@@ -1064,15 +1061,19 @@ async def ingest_products():
             f"{product['description']}. "
             f"Specifications and key features: {specs}."
         ).strip()
-        vector = await gemini_embed(text, task_type="RETRIEVAL_DOCUMENT")
-        if vector is None:
-            logger.error(f"Embed failed for {product['name']}")
-            continue
+        vector, _ = await local_embed(text)
         await conn.execute(
             """
             INSERT INTO product_embeddings (product_id, name, description, category, brand, price, specifications, embedding)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector)
-            ON CONFLICT (product_id) DO UPDATE SET embedding = EXCLUDED.embedding
+            ON CONFLICT (product_id) DO UPDATE SET
+                embedding = EXCLUDED.embedding,
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                category = EXCLUDED.category,
+                brand = EXCLUDED.brand,
+                price = EXCLUDED.price,
+                specifications = EXCLUDED.specifications
             """,
             product['id'], product['name'], product['description'],
             product['category'], product['brand'], product['price'],
@@ -1080,4 +1081,4 @@ async def ingest_products():
         )
         ingested += 1
     await conn.close()
-    return {"message": f"Ingested {ingested} products into vector store"}
+    return {"message": f"Ingested {ingested} products using {embed_model_name()}"}
