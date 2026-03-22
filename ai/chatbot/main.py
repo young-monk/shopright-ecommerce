@@ -294,15 +294,29 @@ CONVERSATIONAL_PHRASES = [
 ]
 
 NON_PRODUCT_PATTERNS = [
+    # SQL / code
     "select ", "insert ", "update ", "delete ", "drop ", "create table",
     "from ", "where ", "join ", "group by", "order by",
     "def ", "class ", "import ", "function ", "console.log", "print(",
     "* from", "SELECT *",
 ]
 
+# Customer service queries — don't run RAG, bot will direct to support
+CUSTOMER_SERVICE_PATTERNS = [
+    "refund", "return my order", "cancel my order", "order status",
+    "track my order", "where is my order", "my order",
+    "complaint", "customer service", "customer support",
+    "shipping", "delivery date", "when will it arrive",
+    "my account", "reset password", "forgot password",
+    "billing", "invoice", "receipt", "charge on my card",
+    "warranty claim", "damaged item", "wrong item",
+]
+
 def is_product_query(query: str) -> bool:
     query_lower = query.lower().strip()
     if any(p.lower() in query_lower for p in NON_PRODUCT_PATTERNS):
+        return False
+    if any(p in query_lower for p in CUSTOMER_SERVICE_PATTERNS):
         return False
     if len(query_lower.split()) <= 3:
         if any(phrase in query_lower for phrase in CONVERSATIONAL_PHRASES):
@@ -556,6 +570,11 @@ If the catalog note says "[Note: Low confidence match]", be honest that you coul
 ## Off-topic or nonsensical input
 If the message is not related to home improvement, products, or shopping (e.g. SQL queries, code, random text), respond with:
 "I'm here to help you find home improvement products and answer DIY questions. Could you tell me what you're working on or looking for?"
+
+## Customer service topics
+If the message is about order refunds, returns, cancellations, delivery, account issues, billing, or complaints, respond with:
+"For help with [topic], please contact our customer support team directly. I'm here to help with product questions and home improvement advice."
+Do not suggest products for customer service queries.
 
 ## Tone and format
 - Be concise but complete. Avoid filler phrases.
