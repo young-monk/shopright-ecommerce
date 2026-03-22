@@ -20,6 +20,8 @@ import time
 from datetime import datetime, timezone
 
 import re
+import statistics
+from collections import defaultdict
 import httpx
 from google.cloud import bigquery
 import asyncpg
@@ -39,6 +41,14 @@ BQ_TABLE       = os.getenv("BIGQUERY_TABLE", "chat_logs")
 BQ_FEEDBACK_TABLE = os.getenv("BIGQUERY_FEEDBACK_TABLE", "feedback")
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
+
+# Gemini-2.5-flash pricing (per 1M tokens, as of 2026)
+_COST_PER_1M_IN  = 0.075
+_COST_PER_1M_OUT = 0.30
+
+# In-memory metrics buffer (last 1000 requests) — used for /metrics/summary
+# In production, all metrics also flow to BigQuery
+_req_metrics: list[dict] = []
 
 SESSION_END_PHRASES = [
     "thanks", "thank you", "that's all", "that's it", "i'm done", "im done",
@@ -176,8 +186,9 @@ async def gemini_generate(contents: list, system_prompt: str) -> tuple[str, int]
     raise HTTPException(status_code=502, detail=f"LLM error: {resp.status_code}")
 
 
-async def gemini_stream(contents: list, system_prompt: str):
-    """Async generator that yields text chunks from Gemini streaming API."""
+async def gemini_stream(contents: list, system_prompt: str, metrics_ctx: dict | None = None):
+    """Async generator that yields text chunks from Gemini streaming API.
+    Populates metrics_ctx with token counts when the stream completes."""
     if not GEMINI_API_KEY:
         yield "[Chatbot not configured] Please set GEMINI_API_KEY."
         return
@@ -197,6 +208,11 @@ async def gemini_stream(contents: list, system_prompt: str):
                 if line.startswith("data: "):
                     try:
                         chunk = json.loads(line[6:])
+                        # Capture token usage from final chunk
+                        if metrics_ctx is not None and "usageMetadata" in chunk:
+                            usage = chunk["usageMetadata"]
+                            metrics_ctx["tokens_in"]  = usage.get("promptTokenCount", 0)
+                            metrics_ctx["tokens_out"] = usage.get("candidatesTokenCount", 0)
                         parts = chunk["candidates"][0]["content"]["parts"]
                         text = next((p.get("text", "") for p in parts if "text" in p), "")
                         if text:
@@ -216,14 +232,13 @@ _FOLLOWUP_SIGNALS = [
     "anything", "something", "any", "do you have", "got any", "show me",
 ]
 
-async def rewrite_query(message: str, history: List[ChatMessage]) -> str:
+async def rewrite_query(message: str, history: List[ChatMessage]) -> tuple[str, bool]:
     """
-    Rewrite a follow-up query into a standalone product search query
-    by injecting context from the conversation history.
-    Only rewrites when the message is ambiguous/short and references prior context.
+    Rewrite a follow-up query into a standalone product search query.
+    Returns (query, was_rewritten).
     """
     if not history or not GEMINI_API_KEY:
-        return message
+        return message, False
 
     msg_lower = message.lower()
     is_followup = (
@@ -231,7 +246,7 @@ async def rewrite_query(message: str, history: List[ChatMessage]) -> str:
         any(sig in msg_lower for sig in _FOLLOWUP_SIGNALS)
     )
     if not is_followup:
-        return message
+        return message, False
 
     recent = history[-4:]
     context = " | ".join(f"{m.role}: {m.content[:120]}" for m in recent)
@@ -251,13 +266,13 @@ async def rewrite_query(message: str, history: List[ChatMessage]) -> str:
                 parts = resp.json()["candidates"][0]["content"]["parts"]
                 text = next((p["text"] for p in parts if "text" in p), None)
                 if not text:
-                    return message
+                    return message, False
                 rewritten = text.strip().strip('"')
                 logger.info(f"Query rewrite: '{message}' → '{rewritten}'")
-                return rewritten
+                return rewritten, True
     except Exception as e:
         logger.warning(f"Query rewrite failed: {e}")
-    return message
+    return message, False
 
 # ── Intent detection ──────────────────────────────────────────────────────────
 PRODUCT_INTENT_KEYWORDS = [
@@ -333,10 +348,10 @@ def extract_price_limit(query: str) -> float | None:
     return None
 
 # ── RAG: Hybrid Vector + Keyword Search ──────────────────────────────────────
-async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[ProductSource]]:
+async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[ProductSource], dict]:
     vector = await gemini_embed(query)
     if not vector:
-        return "", []
+        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
 
     detected_category = detect_category(query)
     price_limit = extract_price_limit(query)
@@ -424,15 +439,18 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
 
         await conn.close()
 
+        rag_meta = {"price_filter_used": price_limit is not None, "price_filter_value": price_limit, "detected_category": detected_category}
+
         if not rows:
-            return "", []
+            rag_meta.update({"rag_confidence": 0.0, "rag_empty": True})
+            return "", [], rag_meta
 
         # Re-rank: sort by combined score (vec_dist - keyword_bonus), take top 5 for context
         ranked = sorted(rows, key=lambda r: float(r['vec_dist']) - float(r['keyword_bonus']))[:5]
 
-        # "Did you mean?" — check if confidence is low (all results have high vec_dist)
         avg_dist = sum(float(r['vec_dist']) for r in ranked) / len(ranked)
         low_confidence = avg_dist > 0.6
+        rag_meta.update({"rag_confidence": round(avg_dist, 4), "rag_empty": False})
 
         context_parts, sources = [], []
         for row in ranked:
@@ -449,11 +467,11 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
             available_cats = list(CATEGORY_KEYWORDS.keys())
             context += f"\n\n[Note: Low confidence match. Available categories: {', '.join(available_cats)}]"
 
-        return context, sources
+        return context, sources, rag_meta
 
     except Exception as e:
         logger.warning(f"RAG retrieval failed: {e}")
-        return "", []
+        return "", [], {"rag_confidence": 0.0, "rag_empty": True, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
 
 # ── Unanswered detection ──────────────────────────────────────────────────────
 def detect_unanswered(response: str, sources_count: int, history: List[ChatMessage]) -> bool:
@@ -522,20 +540,22 @@ def build_contents(message: str, history: List[ChatMessage], context: str) -> li
     return contents
 
 # ── BigQuery logging ──────────────────────────────────────────────────────────
-async def log_to_bigquery(session_id, message_id, user_message, assistant_response, sources, latency_ms, is_unanswered):
+async def log_to_bigquery(session_id, message_id, user_message, assistant_response, sources, latency_ms, is_unanswered, extra: dict | None = None):
     if not GCP_PROJECT:
         return
     try:
+        row = {
+            "session_id": session_id, "message_id": message_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "user_message": user_message, "assistant_response": assistant_response,
+            "sources_used": json.dumps([s.model_dump() for s in sources]),
+            "message_length": len(user_message), "response_length": len(assistant_response),
+            "sources_count": len(sources), "latency_ms": latency_ms, "is_unanswered": is_unanswered,
+        }
+        if extra:
+            row.update(extra)
         bq = bigquery.Client(project=GCP_PROJECT)
-        bq.insert_rows_json(
-            f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}",
-            [{"session_id": session_id, "message_id": message_id,
-              "timestamp": datetime.now(timezone.utc).isoformat(),
-              "user_message": user_message, "assistant_response": assistant_response,
-              "sources_used": json.dumps([s.model_dump() for s in sources]),
-              "message_length": len(user_message), "response_length": len(assistant_response),
-              "sources_count": len(sources), "latency_ms": latency_ms, "is_unanswered": is_unanswered}],
-        )
+        bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}", [row])
     except Exception as e:
         logger.error(f"Failed to log to BigQuery: {e}")
 
@@ -569,6 +589,7 @@ async def chat_stream(request: ChatRequest):
     async def generate():
         t0 = time.monotonic()
         history = request.history or []
+        turn_number = len([m for m in history if m.role == "assistant"]) + 1
 
         # Short-circuit: session ending — skip RAG, stream canned farewell
         if is_session_ending(request.message, history):
@@ -578,20 +599,26 @@ async def chat_stream(request: ChatRequest):
             return
 
         # Step 1: rewrite follow-ups, then RAG
+        metrics_ctx: dict = {}
+        was_rewritten = False
+        rag_meta: dict = {}
         if is_product_query(request.message):
-            search_query = await rewrite_query(request.message, history)
-            context, sources = await get_relevant_context(search_query)
+            search_query, was_rewritten = await rewrite_query(request.message, history)
+            context, sources, rag_meta = await get_relevant_context(search_query)
         else:
             context, sources = "", []
+            rag_meta = {"rag_confidence": 0.0, "rag_empty": False, "price_filter_used": False, "price_filter_value": None, "detected_category": None}
 
         # Step 2: stream LLM tokens
         contents = build_contents(request.message, history, context)
         full_response = ""
+        llm_error = False
         try:
-            async for token in gemini_stream(contents, SYSTEM_PROMPT):
+            async for token in gemini_stream(contents, SYSTEM_PROMPT, metrics_ctx):
                 full_response += token
                 yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
         except HTTPException:
+            llm_error = True
             yield f"data: {json.dumps({'token': 'Sorry, I encountered an error. Please try again.', 'done': False})}\n\n"
 
         # Step 3: send final metadata event
@@ -599,8 +626,33 @@ async def chat_stream(request: ChatRequest):
         is_unanswered = detect_unanswered(full_response, len(sources), history)
         yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [s.model_dump() for s in sources], 'is_unanswered': is_unanswered, 'session_ending': False})}\n\n"
 
+        # Step 4: record metrics
+        tokens_in  = metrics_ctx.get("tokens_in", 0)
+        tokens_out = metrics_ctx.get("tokens_out", 0)
+        cost = (tokens_in / 1e6 * _COST_PER_1M_IN) + (tokens_out / 1e6 * _COST_PER_1M_OUT)
+        m = {
+            "session_id": session_id, "message_id": message_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "latency_ms": latency_ms, "turn_number": turn_number,
+            "is_unanswered": is_unanswered, "llm_error": llm_error,
+            "sources_count": len(sources),
+            "rag_confidence": rag_meta.get("rag_confidence", 0.0),
+            "rag_empty": rag_meta.get("rag_empty", False),
+            "price_filter_used": rag_meta.get("price_filter_used", False),
+            "price_filter_value": rag_meta.get("price_filter_value"),
+            "detected_category": rag_meta.get("detected_category"),
+            "query_rewritten": was_rewritten,
+            "tokens_in": tokens_in, "tokens_out": tokens_out,
+            "estimated_cost_usd": round(cost, 8),
+        }
+        _req_metrics.append(m)
+        if len(_req_metrics) > 1000:
+            _req_metrics.pop(0)
+        logger.info(f"[metrics] latency={latency_ms}ms tokens={tokens_in}+{tokens_out} cost=${cost:.6f} rag_conf={rag_meta.get('rag_confidence',0):.3f} unanswered={is_unanswered} rewritten={was_rewritten} turn={turn_number}")
+
         asyncio.create_task(log_to_bigquery(
-            session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered
+            session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered,
+            extra={k: v for k, v in m.items() if k not in ("session_id","message_id","timestamp","latency_ms","is_unanswered")},
         ))
 
     return StreamingResponse(generate(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
@@ -614,8 +666,8 @@ async def chat(request: ChatRequest):
     history = request.history or []
 
     if is_product_query(request.message):
-        search_query = await rewrite_query(request.message, history)
-        context, sources = await get_relevant_context(search_query)
+        search_query, _ = await rewrite_query(request.message, history)
+        context, sources, _ = await get_relevant_context(search_query)
     else:
         context, sources = "", []
 
@@ -639,6 +691,75 @@ async def feedback(request: FeedbackRequest):
         request.user_message or "", request.assistant_response or "",
     ))
     return {"status": "ok"}
+
+
+@app.get("/metrics/summary")
+async def metrics_summary():
+    """Live metrics summary from the in-memory buffer (last 1000 requests)."""
+    if not _req_metrics:
+        return {"message": "No requests yet — send some chat messages first"}
+
+    n = len(_req_metrics)
+    latencies = sorted(m["latency_ms"] for m in _req_metrics)
+    unanswered = [m for m in _req_metrics if m["is_unanswered"]]
+    errors     = [m for m in _req_metrics if m.get("llm_error")]
+    rewritten  = [m for m in _req_metrics if m.get("query_rewritten")]
+    price_filtered = [m for m in _req_metrics if m.get("price_filter_used")]
+    rag_empty  = [m for m in _req_metrics if m.get("rag_empty")]
+
+    tokens_in  = [m["tokens_in"]  for m in _req_metrics if m.get("tokens_in")]
+    tokens_out = [m["tokens_out"] for m in _req_metrics if m.get("tokens_out")]
+    costs      = [m["estimated_cost_usd"] for m in _req_metrics if m.get("estimated_cost_usd")]
+
+    confs = [m["rag_confidence"] for m in _req_metrics if m.get("rag_confidence")]
+
+    # Category breakdown
+    cat_stats: dict = defaultdict(lambda: {"requests": 0, "unanswered": 0})
+    for m in _req_metrics:
+        cat = m.get("detected_category") or "General / Conversational"
+        cat_stats[cat]["requests"] += 1
+        if m["is_unanswered"]:
+            cat_stats[cat]["unanswered"] += 1
+
+    # Turn distribution
+    turns = [m["turn_number"] for m in _req_metrics]
+
+    def pct(lst): return f"{len(lst)/n*100:.1f}%"
+    def p(lst, pc): return lst[min(int(len(lst)*pc/100), len(lst)-1)] if lst else 0
+
+    return {
+        "requests_sampled": n,
+        "containment_rate": f"{(1 - len(unanswered)/n)*100:.1f}%",
+        "unanswered_rate": pct(unanswered),
+        "error_rate": pct(errors),
+        "latency": {
+            "p50_ms": p(latencies, 50),
+            "p95_ms": p(latencies, 95),
+            "p99_ms": p(latencies, 99),
+            "avg_ms": int(sum(latencies) / n),
+        },
+        "rag": {
+            "avg_confidence_score": round(sum(confs)/len(confs), 4) if confs else None,
+            "empty_results_rate": pct(rag_empty),
+            "price_filter_usage_rate": pct(price_filtered),
+            "query_rewrite_rate": pct(rewritten),
+        },
+        "tokens": {
+            "avg_input":  int(sum(tokens_in)/len(tokens_in))   if tokens_in  else 0,
+            "avg_output": int(sum(tokens_out)/len(tokens_out)) if tokens_out else 0,
+            "avg_cost_per_request": f"${sum(costs)/len(costs):.6f}" if costs else "$0.000000",
+            "total_estimated_cost": f"${sum(costs):.4f}" if costs else "$0.0000",
+        },
+        "turns": {
+            "avg_turn_number": round(sum(turns)/len(turns), 1),
+            "turn_1_rate": f"{sum(1 for t in turns if t==1)/n*100:.1f}%",
+            "turn_3plus_rate": f"{sum(1 for t in turns if t>=3)/n*100:.1f}%",
+        },
+        "category_breakdown": {
+            cat: {**v, "unanswered_rate": f"{v['unanswered']/v['requests']*100:.1f}%"}
+            for cat, v in sorted(cat_stats.items(), key=lambda x: -x[1]["requests"])
+        },
+    }
 
 
 @app.post("/review")
