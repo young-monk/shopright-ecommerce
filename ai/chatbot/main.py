@@ -19,6 +19,7 @@ import logging
 import time
 from datetime import datetime, timezone
 
+import re
 import httpx
 from google.cloud import bigquery
 import asyncpg
@@ -310,6 +311,27 @@ def detect_category(query: str) -> str | None:
             return category
     return None
 
+# ── Price extraction ──────────────────────────────────────────────────────────
+_PRICE_PATTERNS = [
+    r'under\s*\$?(\d+(?:\.\d+)?)',
+    r'below\s*\$?(\d+(?:\.\d+)?)',
+    r'less\s+than\s*\$?(\d+(?:\.\d+)?)',
+    r'cheaper\s+than\s*\$?(\d+(?:\.\d+)?)',
+    r'up\s+to\s*\$?(\d+(?:\.\d+)?)',
+    r'within\s*\$?(\d+(?:\.\d+)?)',
+    r'max(?:imum)?\s*\$?(\d+(?:\.\d+)?)',
+    r'budget\s*(?:of\s*|around\s*|~\s*)?\$?(\d+(?:\.\d+)?)',
+    r'\$?(\d+(?:\.\d+)?)\s*budget',
+    r'around\s*\$(\d+(?:\.\d+)?)',
+]
+
+def extract_price_limit(query: str) -> float | None:
+    for pattern in _PRICE_PATTERNS:
+        m = re.search(pattern, query.lower())
+        if m:
+            return float(m.group(1))
+    return None
+
 # ── RAG: Hybrid Vector + Keyword Search ──────────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[ProductSource]]:
     vector = await gemini_embed(query)
@@ -317,6 +339,9 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
         return "", []
 
     detected_category = detect_category(query)
+    price_limit = extract_price_limit(query)
+    price_clause = f"AND price <= {price_limit:.2f}" if price_limit is not None else ""
+
     stop_words = {"what", "which", "that", "this", "with", "have", "from", "your", "best", "good",
                   "need", "want", "some", "for", "can", "how", "does", "show", "find", "give",
                   "tell", "about", "under", "over", "more", "less", "cheap", "cheaper", "those", "other"}
@@ -328,12 +353,12 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
         if detected_category and keywords:
             keyword_pattern = "%(" + "|".join(keywords) + ")%"
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist,
                        CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
                 FROM product_embeddings
-                WHERE category ILIKE $4
+                WHERE category ILIKE $4 {price_clause}
                 ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
                 LIMIT $2
                 """,
@@ -341,11 +366,12 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
             )
             if not rows:
                 rows = await conn.fetch(
-                    """
+                    f"""
                     SELECT product_id, name, description, category, brand, price, specifications,
                            (embedding <=> $1::vector) AS vec_dist,
                            CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
                     FROM product_embeddings
+                    WHERE 1=1 {price_clause}
                     ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
                     LIMIT $2
                     """,
@@ -353,11 +379,11 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
                 )
         elif detected_category:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
                 FROM product_embeddings
-                WHERE category ILIKE $3
+                WHERE category ILIKE $3 {price_clause}
                 ORDER BY embedding <=> $1::vector
                 LIMIT $2
                 """,
@@ -365,21 +391,22 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
             )
             if not rows:
                 rows = await conn.fetch(
-                    """
+                    f"""
                     SELECT product_id, name, description, category, brand, price, specifications,
                            (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
-                    FROM product_embeddings ORDER BY embedding <=> $1::vector LIMIT $2
+                    FROM product_embeddings WHERE 1=1 {price_clause} ORDER BY embedding <=> $1::vector LIMIT $2
                     """,
                     str(vector), top_k,
                 )
         elif keywords:
             keyword_pattern = "%(" + "|".join(keywords) + ")%"
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist,
                        CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END AS keyword_bonus
                 FROM product_embeddings
+                WHERE 1=1 {price_clause}
                 ORDER BY (embedding <=> $1::vector) - (CASE WHEN LOWER(name || ' ' || description) ~ $3 THEN 0.15 ELSE 0 END)
                 LIMIT $2
                 """,
@@ -387,10 +414,10 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list[P
             )
         else:
             rows = await conn.fetch(
-                """
+                f"""
                 SELECT product_id, name, description, category, brand, price, specifications,
                        (embedding <=> $1::vector) AS vec_dist, 0 AS keyword_bonus
-                FROM product_embeddings ORDER BY embedding <=> $1::vector LIMIT $2
+                FROM product_embeddings WHERE 1=1 {price_clause} ORDER BY embedding <=> $1::vector LIMIT $2
                 """,
                 str(vector), top_k,
             )
@@ -440,12 +467,20 @@ SYSTEM_PROMPT = """You are ShopRight's expert AI assistant for a home improvemen
 ## Your role
 Help customers find the right products for their projects, understand specifications, compare options, and get practical advice on home improvement tasks.
 
+## Ask before recommending
+When a product request is vague (no budget, use case, or preference stated), ask 1-2 short clarifying questions BEFORE recommending. Examples:
+- "I need a drill" → "What will you mainly use it for — light home tasks or heavy-duty work? And do you have a budget in mind?"
+- "I want paint" → "Which room and surface? Do you have a finish preference (matte, eggshell, gloss)?"
+- "Show me lawn mowers" → "How large is your lawn, and do you prefer cordless or gas-powered?"
+Only ask once — if the user has already given enough context, go straight to recommendations.
+
 ## How to answer product questions
 When product catalog context is provided:
 1. Recommend the MOST RELEVANT product(s) from the catalog — match the customer's stated need precisely.
 2. Always include the product name, brand, and exact price (e.g. "The DeWalt 20V MAX Drill at $129.99").
 3. If multiple options exist, compare them on the most relevant dimensions (power, price, weight, battery).
 4. Mention compatibility or safety considerations when relevant.
+5. If you already recommended products earlier in this conversation, do NOT repeat the same ones — offer different options or explain why the previous ones are still the best fit.
 
 ## Comparisons
 When the user asks to compare products or uses "vs", "versus", "which is better", format your response as a compact markdown table with columns: Product | Price | Best For. Keep each cell under 8 words. Use short separators (e.g. |---|---|---|). Do not pad or align columns.
@@ -459,7 +494,8 @@ When the user asks to compare products or uses "vs", "versus", "which is better"
 If the catalog note says "[Note: Low confidence match]", be honest that you couldn't find an exact match and suggest the customer browse the listed categories or ask a store associate.
 
 ## When you cannot find a matching product
-Say clearly: "I couldn't find an exact match in our current catalog for [item]. Please ask a store associate for help." Do NOT fabricate product names or prices.
+- If the user is asking how to fix or repair something (leaky faucet, broken tile, etc.), give practical DIY advice first, then mention any relevant tools, materials, or related products from the catalog that could help (e.g. suggest plumbing tools or faucets if someone asks about a leaky faucet).
+- If no related products exist at all, say: "I couldn't find an exact match in our current catalog for [item]. Please ask a store associate for help." Do NOT fabricate product names or prices.
 
 ## Off-topic or nonsensical input
 If the message is not related to home improvement, products, or shopping (e.g. SQL queries, code, random text), respond with:
