@@ -282,6 +282,54 @@ async def ingest_reviews(conn: asyncpg.Connection) -> tuple[int, int]:
     return reviews_inserted, summaries_upserted
 
 
+# ── Schema ─────────────────────────────────────────────────────────────────────
+
+async def ensure_schema(conn: asyncpg.Connection) -> None:
+    """Create tables/indexes required by ingest if they don't already exist."""
+    await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_embeddings (
+            id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+            doc_type    VARCHAR(20)  NOT NULL,
+            source_id   VARCHAR(200) NOT NULL,
+            content     TEXT         NOT NULL,
+            metadata    JSONB        NOT NULL DEFAULT '{}',
+            embedding   vector(3072) NOT NULL,
+            created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS knowledge_embeddings_source_unique
+            ON knowledge_embeddings (doc_type, source_id)
+    """)
+    await conn.execute("""
+        CREATE INDEX IF NOT EXISTS knowledge_embeddings_hnsw
+            ON knowledge_embeddings
+            USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops)
+            WITH (m = 16, ef_construction = 64)
+    """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS product_reviews (
+            id          UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+            product_id  UUID         REFERENCES products(id) ON DELETE CASCADE,
+            sku         VARCHAR(100) NOT NULL,
+            stars       SMALLINT     NOT NULL CHECK (stars BETWEEN 1 AND 5),
+            title       VARCHAR(500),
+            body        TEXT,
+            author      VARCHAR(255),
+            review_date DATE,
+            verified    BOOLEAN      DEFAULT FALSE,
+            created_at  TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    await conn.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS product_reviews_dedup
+            ON product_reviews (product_id, author, review_date, title)
+            WHERE author IS NOT NULL AND review_date IS NOT NULL AND title IS NOT NULL
+    """)
+    logger.info("Schema ready")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 async def main():
@@ -291,6 +339,7 @@ async def main():
     t0 = time.monotonic()
     conn = await asyncpg.connect(DATABASE_URL)
     try:
+        await ensure_schema(conn)
         products  = await ingest_products(conn)
         faqs      = await ingest_faqs(conn)
         reviews, summaries = await ingest_reviews(conn)
