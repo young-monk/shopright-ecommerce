@@ -49,8 +49,8 @@ class ProductReview(Base):
 
 
 class ReviewResponse(BaseModel):
-    id: str
-    product_id: Optional[str]
+    id: UUID
+    product_id: Optional[UUID]
     sku: str
     stars: int
     title: Optional[str]

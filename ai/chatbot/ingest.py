@@ -329,6 +329,11 @@ async def ensure_schema(conn: asyncpg.Connection) -> None:
             ON product_reviews (product_id, author, review_date, title)
             WHERE author IS NOT NULL AND review_date IS NOT NULL AND title IS NOT NULL
     """)
+    # Backfill image_url for the 8 original seed products that were inserted without one
+    await conn.execute("""
+        UPDATE products SET image_url = 'https://picsum.photos/seed/' || sku || '/400/300'
+        WHERE image_url IS NULL AND sku IN ('DWD-001','MIL-002','OWC-003','LEV-004','MOE-005','BHR-006','PER-007','GRE-008')
+    """)
     logger.info("Schema ready")
 
 
