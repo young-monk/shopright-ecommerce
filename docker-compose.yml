@@ -86,8 +86,8 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-      - NEXT_PUBLIC_CHATBOT_URL=http://localhost:8004
+      - API_GATEWAY_URL=http://api-gateway:8000
+      - CHATBOT_SERVICE_URL=http://chatbot:8004
     depends_on:
       - api-gateway
 

@@ -5,7 +5,7 @@ import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
-const CHATBOT_URL = process.env.NEXT_PUBLIC_CHATBOT_URL || 'http://localhost:8004'
+const CHATBOT_URL = '/chatbot-proxy'
 
 interface ProductSource {
   id: string

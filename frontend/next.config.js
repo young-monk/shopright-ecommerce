@@ -8,9 +8,13 @@ const nextConfig = {
       { protocol: 'https', hostname: 'picsum.photos' },
     ],
   },
-  env: {
-    NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
-    NEXT_PUBLIC_CHATBOT_URL: process.env.NEXT_PUBLIC_CHATBOT_URL,
+  async rewrites() {
+    const apiGateway = process.env.API_GATEWAY_URL || 'http://api-gateway:8000'
+    const chatbot   = process.env.CHATBOT_SERVICE_URL || 'http://chatbot:8004'
+    return [
+      { source: '/api-proxy/:path*',     destination: `${apiGateway}/:path*` },
+      { source: '/chatbot-proxy/:path*', destination: `${chatbot}/:path*`    },
+    ]
   },
 };
 

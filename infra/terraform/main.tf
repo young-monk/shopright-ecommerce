@@ -328,11 +328,11 @@ resource "google_cloud_run_v2_service" "frontend" {
       image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/frontend:latest"
       ports { container_port = 3000 }
       env {
-        name  = "NEXT_PUBLIC_API_URL"
+        name  = "API_GATEWAY_URL"
         value = google_cloud_run_v2_service.api_gateway.uri
       }
       env {
-        name  = "NEXT_PUBLIC_CHATBOT_URL"
+        name  = "CHATBOT_SERVICE_URL"
         value = google_cloud_run_v2_service.chatbot.uri
       }
       resources {

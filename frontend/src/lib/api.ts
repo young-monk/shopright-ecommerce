@@ -3,7 +3,7 @@ import axios from 'axios'
 // withCredentials ensures the httpOnly auth_token cookie is sent on every request.
 // The token is never accessible to JavaScript — set and cleared by the server only.
 export const api = axios.create({
-  baseURL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000',
+  baseURL: '/api-proxy',
   headers: { 'Content-Type': 'application/json' },
   withCredentials: true,
 })
