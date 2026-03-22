@@ -1,6 +1,6 @@
 'use client'
 import { useState, useRef, useEffect } from 'react'
-import { MessageSquare, X, Send, Loader2, ThumbsUp, ThumbsDown } from 'lucide-react'
+import { MessageSquare, X, Send, Loader2, ThumbsUp, ThumbsDown, Star } from 'lucide-react'
 import axios from 'axios'
 import ReactMarkdown from 'react-markdown'
 
@@ -22,6 +22,7 @@ interface Message {
   rating?: 1 | -1
   userMessage?: string
   streaming?: boolean
+  sessionEnding?: boolean
 }
 
 export function ChatbotWidget() {
@@ -37,6 +38,9 @@ export function ChatbotWidget() {
   const [input, setInput] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [sessionId] = useState(() => crypto.randomUUID())
+  const [sessionEnded, setSessionEnded] = useState(false)
+  const [reviewSubmitted, setReviewSubmitted] = useState(false)
+  const [hoveredStar, setHoveredStar] = useState(0)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -98,6 +102,7 @@ export function ChatbotWidget() {
             const data = JSON.parse(line.slice(6))
             if (data.done) {
               // Final event — patch in metadata
+              if (data.session_ending) setSessionEnded(true)
               setMessages(prev => prev.map(m =>
                 m.id === streamingId
                   ? {
@@ -107,6 +112,7 @@ export function ChatbotWidget() {
                       isUnanswered: data.is_unanswered,
                       userMessage: userText,
                       streaming: false,
+                      sessionEnding: data.session_ending,
                     }
                   : m
               ))
@@ -142,6 +148,15 @@ export function ChatbotWidget() {
         user_message: msg.userMessage || '',
         assistant_response: msg.content,
       })
+    } catch {
+      // non-critical
+    }
+  }
+
+  const submitReview = async (stars: number) => {
+    setReviewSubmitted(true)
+    try {
+      await axios.post(`${CHATBOT_URL}/review`, { session_id: sessionId, stars })
     } catch {
       // non-critical
     }
@@ -232,8 +247,35 @@ export function ChatbotWidget() {
                     </div>
                   )}
 
+                  {/* Star review UI (session ending) */}
+                  {msg.sessionEnding && !msg.streaming && (
+                    <div className="pl-1 mt-2">
+                      {reviewSubmitted ? (
+                        <p className="text-xs text-green-600 font-medium">Thanks for your feedback! Come back anytime. 😊</p>
+                      ) : (
+                        <div className="flex gap-0.5">
+                          {[1, 2, 3, 4, 5].map(star => (
+                            <button
+                              key={star}
+                              onClick={() => submitReview(star)}
+                              onMouseEnter={() => setHoveredStar(star)}
+                              onMouseLeave={() => setHoveredStar(0)}
+                              className="transition-colors"
+                              title={`${star} star${star > 1 ? 's' : ''}`}
+                            >
+                              <Star
+                                size={20}
+                                className={star <= hoveredStar ? 'text-yellow-400 fill-yellow-400' : 'text-gray-300'}
+                              />
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   {/* Rating buttons */}
-                  {msg.role === 'assistant' && msg.id !== '0' && !msg.streaming && (
+                  {msg.role === 'assistant' && msg.id !== '0' && !msg.streaming && !msg.sessionEnding && (
                     <div className="flex gap-1 pl-1">
                       <button
                         onClick={() => submitRating(msg, 1)}
@@ -259,24 +301,28 @@ export function ChatbotWidget() {
 
           {/* Input */}
           <div className="p-4 border-t border-gray-200">
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && sendMessage()}
-                placeholder="Ask me anything..."
-                className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
-                disabled={isLoading}
-              />
-              <button
-                onClick={sendMessage}
-                disabled={!input.trim() || isLoading}
-                className="bg-primary hover:bg-primary-dark text-white rounded-lg p-2 disabled:opacity-50 transition-colors"
-              >
-                {isLoading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-              </button>
-            </div>
+            {sessionEnded ? (
+              <p className="text-xs text-center text-gray-400">Session ended. Start a new chat anytime!</p>
+            ) : (
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && sendMessage()}
+                  placeholder="Ask me anything..."
+                  className="flex-1 border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+                  disabled={isLoading}
+                />
+                <button
+                  onClick={sendMessage}
+                  disabled={!input.trim() || isLoading}
+                  className="bg-primary hover:bg-primary-dark text-white rounded-lg p-2 disabled:opacity-50 transition-colors"
+                >
+                  {isLoading ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}

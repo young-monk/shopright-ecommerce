@@ -39,6 +39,26 @@ BQ_FEEDBACK_TABLE = os.getenv("BIGQUERY_FEEDBACK_TABLE", "feedback")
 
 GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
+SESSION_END_PHRASES = [
+    "thanks", "thank you", "that's all", "that's it", "i'm done", "im done",
+    "goodbye", "bye", "see you", "see ya", "all set", "got it", "perfect",
+    "great thanks", "no more questions", "nothing else", "that's everything",
+    "i'm good", "im good", "i'm all good", "that'll do", "no thanks",
+]
+
+SESSION_END_RESPONSE = (
+    "You're welcome! Before you go — how would you rate your experience today? "
+    "Your feedback helps us improve. ⭐"
+)
+
+def is_session_ending(message: str, history: List) -> bool:
+    """Return True if the user is wrapping up the conversation."""
+    msg = message.lower().strip()
+    # Must be a short, closing message
+    if len(msg.split()) > 6:
+        return False
+    return any(phrase in msg for phrase in SESSION_END_PHRASES)
+
 UNCERTAINTY_PHRASES = [
     "i don't have", "i don't know", "i'm not sure", "i cannot find",
     "not available in", "no information", "outside my knowledge",
@@ -86,6 +106,7 @@ class ChatResponse(BaseModel):
     message_id: str
     sources: List[ProductSource] = []
     is_unanswered: bool = False
+    session_ending: bool = False
 
 class FeedbackRequest(BaseModel):
     message_id: str
@@ -93,6 +114,10 @@ class FeedbackRequest(BaseModel):
     rating: int
     user_message: Optional[str] = None
     assistant_response: Optional[str] = None
+
+class ReviewRequest(BaseModel):
+    session_id: str
+    stars: int  # 1-5
 
 # ── Gemini helpers ────────────────────────────────────────────────────────────
 async def gemini_embed(text: str, task_type: str = "RETRIEVAL_QUERY") -> list[float] | None:
@@ -492,9 +517,16 @@ async def chat_stream(request: ChatRequest):
 
     async def generate():
         t0 = time.monotonic()
+        history = request.history or []
+
+        # Short-circuit: session ending — skip RAG, stream canned farewell
+        if is_session_ending(request.message, history):
+            for token in SESSION_END_RESPONSE.split(" "):
+                yield f"data: {json.dumps({'token': token + ' ', 'done': False})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': True})}\n\n"
+            return
 
         # Step 1: rewrite follow-ups, then RAG
-        history = request.history or []
         if is_product_query(request.message):
             search_query = await rewrite_query(request.message, history)
             context, sources = await get_relevant_context(search_query)
@@ -508,13 +540,13 @@ async def chat_stream(request: ChatRequest):
             async for token in gemini_stream(contents, SYSTEM_PROMPT):
                 full_response += token
                 yield f"data: {json.dumps({'token': token, 'done': False})}\n\n"
-        except HTTPException as e:
+        except HTTPException:
             yield f"data: {json.dumps({'token': 'Sorry, I encountered an error. Please try again.', 'done': False})}\n\n"
 
         # Step 3: send final metadata event
         latency_ms = int((time.monotonic() - t0) * 1000)
         is_unanswered = detect_unanswered(full_response, len(sources), history)
-        yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [s.model_dump() for s in sources], 'is_unanswered': is_unanswered})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [s.model_dump() for s in sources], 'is_unanswered': is_unanswered, 'session_ending': False})}\n\n"
 
         asyncio.create_task(log_to_bigquery(
             session_id, message_id, request.message, full_response, sources, latency_ms, is_unanswered
@@ -555,6 +587,24 @@ async def feedback(request: FeedbackRequest):
         request.message_id, request.session_id, request.rating,
         request.user_message or "", request.assistant_response or "",
     ))
+    return {"status": "ok"}
+
+
+@app.post("/review")
+async def review(request: ReviewRequest):
+    if request.stars < 1 or request.stars > 5:
+        raise HTTPException(status_code=400, detail="stars must be between 1 and 5")
+    if GCP_PROJECT:
+        try:
+            bq = bigquery.Client(project=GCP_PROJECT)
+            bq.insert_rows_json(
+                f"{GCP_PROJECT}.{BQ_DATASET}.session_reviews",
+                [{"session_id": request.session_id,
+                  "stars": request.stars,
+                  "timestamp": datetime.now(timezone.utc).isoformat()}],
+            )
+        except Exception as e:
+            logger.error(f"Failed to log review to BigQuery: {e}")
     return {"status": "ok"}
 
 
