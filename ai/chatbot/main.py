@@ -364,12 +364,14 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
         db_ms = int((time.monotonic() - t_db) * 1000)
         await conn.close()
 
+        ann_candidates_count = len(rows) if rows else 0
         rag_meta = {
             "price_filter_used": price_limit is not None,
             "price_filter_value": price_limit,
             "detected_category": detected_category,
             "embed_ms": embed_ms,
             "db_ms": db_ms,
+            "ann_candidates_count": ann_candidates_count,
         }
 
         if not rows:
@@ -409,11 +411,14 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
         dedup_removed = len(reranked_rows) - len(deduped)
         ranked = deduped[:8]
 
-        avg_dist = sum(float(r["vec_dist"]) for r in ranked) / len(ranked)
+        vec_distances = [float(r["vec_dist"]) for r in ranked]
+        avg_dist = sum(vec_distances) / len(vec_distances)
+        min_vec_distance = round(min(vec_distances), 4)
         low_confidence = avg_dist > 0.6
         product_rows = [r for r in ranked if r["doc_type"] == "product"]
         rag_meta.update({
             "rag_confidence": round(avg_dist, 4),
+            "min_vec_distance": min_vec_distance,
             "rag_empty": False,
             "dedup_removed_count": dedup_removed,
             "unique_brands_count": len({json.loads(r["metadata"]).get("brand") for r in product_rows}),
@@ -958,6 +963,8 @@ async def chat_stream(request: ChatRequest):
             "unique_brands_count": rag_meta.get("unique_brands_count"),
             "unique_categories_count": rag_meta.get("unique_categories_count"),
             "rerank_used": rag_meta.get("rerank_used"),
+            "min_vec_distance": rag_meta.get("min_vec_distance"),
+            "ann_candidates_count": rag_meta.get("ann_candidates_count"),
             "hallucination_flag": (len(raw_sources) > 0 and not any(
                 s["name"].lower() in full_response.lower() for s in raw_sources
             )) if raw_sources else None,

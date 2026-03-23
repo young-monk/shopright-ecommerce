@@ -444,6 +444,8 @@ resource "google_bigquery_table" "chat_logs" {
     # RAG
     { name = "sources_count", type = "INTEGER", mode = "NULLABLE" },
     { name = "rag_confidence", type = "FLOAT", mode = "NULLABLE" },
+    { name = "min_vec_distance", type = "FLOAT", mode = "NULLABLE" },
+    { name = "ann_candidates_count", type = "INTEGER", mode = "NULLABLE" },
     { name = "rag_empty", type = "BOOLEAN", mode = "NULLABLE" },
     { name = "detected_category", type = "STRING", mode = "NULLABLE" },
     { name = "price_filter_used", type = "BOOLEAN", mode = "NULLABLE" },
@@ -537,6 +539,52 @@ resource "google_bigquery_table" "session_reviews" {
     type  = "DAY"
     field = "timestamp"
   }
+}
+
+# ── BQ view: session_outcomes ─────────────────────────────────────────────────
+resource "google_bigquery_table" "session_outcomes" {
+  dataset_id          = google_bigquery_dataset.chat_analytics.dataset_id
+  table_id            = "session_outcomes"
+  deletion_protection = false
+
+  view {
+    query          = <<-SQL
+      SELECT
+        s.session_id,
+        s.timestamp                                                          AS session_end_at,
+        s.stars                                                              AS star_rating,
+        s.turn_count,
+        s.unanswered_count,
+        ROUND(SAFE_DIVIDE(s.unanswered_count, s.turn_count), 3)             AS failure_rate,
+        COUNTIF(e.event_type = 'chip_click') > 0                            AS had_chip_click,
+        COUNT(DISTINCT f.message_id)                                        AS feedback_count,
+        ROUND(AVG(f.rating), 2)                                             AS avg_message_feedback,
+        COUNTIF(l.frustration_signal)                                       AS frustrated_turns,
+        COUNTIF(l.rec_gap)                                                  AS rec_gap_turns,
+        CASE
+          WHEN s.stars >= 4                                                  THEN 'success'
+          WHEN COUNTIF(e.event_type = 'chip_click') > 0
+               AND (s.stars IS NULL OR s.stars >= 3)                        THEN 'success'
+          WHEN s.stars <= 2                                                  THEN 'failure'
+          WHEN SAFE_DIVIDE(s.unanswered_count, s.turn_count) > 0.5         THEN 'failure'
+          WHEN COUNTIF(l.frustration_signal) >= 2                           THEN 'failure'
+          ELSE 'inconclusive'
+        END                                                                  AS outcome
+      FROM `${var.project_id}.chat_analytics.session_reviews`  s
+      LEFT JOIN `${var.project_id}.chat_analytics.chat_events` e ON e.session_id = s.session_id
+      LEFT JOIN `${var.project_id}.chat_analytics.feedback`    f ON f.session_id = s.session_id
+      LEFT JOIN `${var.project_id}.chat_analytics.chat_logs`   l ON l.session_id = s.session_id
+      GROUP BY s.session_id, s.timestamp, s.stars, s.turn_count, s.unanswered_count
+    SQL
+    use_legacy_sql = false
+  }
+
+  depends_on = [
+    google_bigquery_table.session_reviews,
+    google_bigquery_table.chat_events,
+    google_bigquery_table.feedback,
+    google_bigquery_table.chat_logs,
+  ]
 }
 
 # ── Cloud Storage ──────────────────────────────────────────────────────────────
