@@ -464,6 +464,7 @@ resource "google_bigquery_table" "chat_logs" {
     { name = "rerank_used", type = "BOOLEAN", mode = "NULLABLE" },
     { name = "prompt_injection_flag", type = "BOOLEAN", mode = "NULLABLE" },
     { name = "injection_pattern", type = "STRING", mode = "NULLABLE" },
+    { name = "intent", type = "STRING", mode = "NULLABLE" },
   ])
 
   time_partitioning {

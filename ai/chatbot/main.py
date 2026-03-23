@@ -521,11 +521,43 @@ class AnalyticsEventRequest(BaseModel):
     product_price: Optional[float] = None
     product_category: Optional[str] = None
 
+# ── Intent classification ──────────────────────────────────────────────────────
+_INTENT_LABELS = (
+    "product_lookup",       # searching for a specific product
+    "project_advice",       # how-to / DIY project guidance
+    "compatibility",        # will X work with Y
+    "pricing_availability", # price, cost, stock, availability
+    "troubleshooting",      # diagnosing or fixing a problem
+    "general_chat",         # greetings, thanks, off-topic
+)
+_INTENT_PROMPT = (
+    "Classify the following customer message into exactly one of these intent labels:\n"
+    + ", ".join(_INTENT_LABELS)
+    + "\n\nRespond with only the label — no explanation.\n\nMessage: "
+)
+
+async def classify_intent(message: str) -> str:
+    if not GEMINI_API_KEY:
+        return "unknown"
+    try:
+        import google.genai as genai
+        _cl = genai.Client(api_key=GEMINI_API_KEY)
+        resp = await _cl.aio.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=_INTENT_PROMPT + message[:500],
+        )
+        label = resp.text.strip().lower().split()[0].rstrip(".,")
+        return label if label in _INTENT_LABELS else "unknown"
+    except Exception as e:
+        logger.warning(f"Intent classification failed: {e}")
+        return "unknown"
+
 # ── BigQuery logging ───────────────────────────────────────────────────────────
 async def log_to_bigquery(session_id, message_id, user_message, assistant_response, sources, latency_ms, is_unanswered, extra: dict | None = None):
     if not GCP_PROJECT:
         return
     try:
+        intent = await classify_intent(user_message)
         row = {
             "session_id": session_id, "message_id": message_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -533,6 +565,7 @@ async def log_to_bigquery(session_id, message_id, user_message, assistant_respon
             "sources_used": json.dumps(sources if isinstance(sources[0], dict) else [s.model_dump() for s in sources]) if sources else "[]",
             "message_length": len(user_message), "response_length": len(assistant_response),
             "sources_count": len(sources), "latency_ms": latency_ms, "is_unanswered": is_unanswered,
+            "intent": intent,
         }
         if extra:
             row.update(extra)
