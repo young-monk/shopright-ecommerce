@@ -170,6 +170,8 @@ def detect_unanswered(response: str, sources_count: int, history: list) -> bool:
     has_uncertainty = any(phrase in response_lower for phrase in UNCERTAINTY_PHRASES)
     return sources_count == 0 and has_uncertainty
 
+_INJECTION_RESPONSE = "I'm ShopRight's home improvement assistant and I'm not able to help with that request. Is there something around the house I can help you with?"
+
 _SCOPE_REJECTION_MARKER = "i'm here to help with home improvement"
 
 def detect_scope_rejected(response: str) -> bool:
@@ -629,10 +631,18 @@ async def chat_stream(request: ChatRequest):
         logger.warning(f"[rate_limit] session={session_id}")
         raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
 
-    # Prompt injection detection (flag + log; Gemini safety handles actual refusal)
+    # Prompt injection detection — hard-block before reaching the LLM
     is_injection, injection_pattern = detect_prompt_injection(request.message)
     if is_injection:
         logger.warning(f"[injection] pattern={injection_pattern} session={session_id}")
+        async def _blocked():
+            yield f"data: {json.dumps({'token': _INJECTION_RESPONSE, 'done': False})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': False})}\n\n"
+            asyncio.create_task(log_to_bigquery(
+                session_id, message_id, request.message, _INJECTION_RESPONSE, [], 0, False,
+                extra={"prompt_injection_flag": True, "injection_pattern": injection_pattern},
+            ))
+        return StreamingResponse(_blocked(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
     async def generate():
         t0 = time.monotonic()
@@ -819,6 +829,12 @@ async def chat(request: ChatRequest):
     is_injection, injection_pattern = detect_prompt_injection(request.message)
     if is_injection:
         logger.warning(f"[injection] pattern={injection_pattern} session={session_id}")
+        asyncio.create_task(log_to_bigquery(
+            session_id, message_id, request.message, _INJECTION_RESPONSE, [], 0, False,
+            extra={"prompt_injection_flag": True, "injection_pattern": injection_pattern},
+        ))
+        return ChatResponse(response=_INJECTION_RESPONSE, session_id=session_id,
+                            message_id=message_id, sources=[], is_unanswered=False)
 
     _cv_message_id.set(message_id)
     _sources_store.pop(message_id, None)
