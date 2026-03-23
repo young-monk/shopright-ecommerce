@@ -646,6 +646,21 @@ resource "google_project_iam_member" "compute_cloudsql_client" {
   member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
 }
 
+# ── GitHub Actions (WIF) service account IAM ──────────────────────────────────
+# Monitoring + logging admin needed to manage alert policies, dashboards,
+# notification channels, and log-based metrics via Terraform CI/CD.
+resource "google_project_iam_member" "github_actions_monitoring" {
+  project = var.project_id
+  role    = "roles/monitoring.admin"
+  member  = "serviceAccount:shopright-github-actions@${var.project_id}.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "github_actions_logging" {
+  project = var.project_id
+  role    = "roles/logging.admin"
+  member  = "serviceAccount:shopright-github-actions@${var.project_id}.iam.gserviceaccount.com"
+}
+
 # ── Monitoring & Alerting ──────────────────────────────────────────────────────
 
 # Email notification channel (only created when alert_email is provided)
