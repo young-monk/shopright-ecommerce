@@ -33,6 +33,8 @@ resource "google_project_service" "apis" {
     "cloudresourcemanager.googleapis.com",
     "vpcaccess.googleapis.com",
     "servicenetworking.googleapis.com",
+    "monitoring.googleapis.com",
+    "logging.googleapis.com",
   ])
   service            = each.key
   disable_on_destroy = false
@@ -640,4 +642,342 @@ resource "google_project_iam_member" "compute_cloudsql_client" {
   project = var.project_id
   role    = "roles/cloudsql.client"
   member  = "serviceAccount:${data.google_project.project.number}-compute@developer.gserviceaccount.com"
+}
+
+# ── Monitoring & Alerting ──────────────────────────────────────────────────────
+
+# Email notification channel (only created when alert_email is provided)
+resource "google_monitoring_notification_channel" "email" {
+  count        = var.alert_email != "" ? 1 : 0
+  display_name = "ShopRight Alerts Email"
+  type         = "email"
+  labels       = { email_address = var.alert_email }
+  depends_on   = [google_project_service.apis]
+}
+
+locals {
+  notification_channels = var.alert_email != "" ? [google_monitoring_notification_channel.email[0].name] : []
+  # Cloud Run resource filter shared across alert policies
+  chatbot_filter = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"chatbot-service\""
+  sql_filter     = "resource.type=\"cloudsql_database\""
+}
+
+# ── Alert: chatbot 5xx error rate > 1% ───────────────────────────────────────
+resource "google_monitoring_alert_policy" "chatbot_5xx" {
+  display_name = "Chatbot 5xx Error Rate > 1%"
+  combiner     = "OR"
+  depends_on   = [google_project_service.apis]
+
+  conditions {
+    display_name = "5xx rate above threshold"
+    condition_threshold {
+      filter          = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/request_count\" AND metric.labels.response_code_class=\"5xx\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0.01
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_RATE"
+        cross_series_reducer = "REDUCE_MEAN"
+        group_by_fields      = ["resource.labels.service_name"]
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "1800s" }
+}
+
+# ── Alert: chatbot p95 latency > 10s ─────────────────────────────────────────
+resource "google_monitoring_alert_policy" "chatbot_latency" {
+  display_name = "Chatbot p95 Latency > 10s"
+  combiner     = "OR"
+  depends_on   = [google_project_service.apis]
+
+  conditions {
+    display_name = "p95 latency above 10s"
+    condition_threshold {
+      filter          = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/request_latencies\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 10000  # milliseconds
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_PERCENTILE_99"
+        cross_series_reducer = "REDUCE_MEAN"
+        group_by_fields      = ["resource.labels.service_name"]
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "1800s" }
+}
+
+# ── Alert: Cloud SQL CPU > 80% ────────────────────────────────────────────────
+resource "google_monitoring_alert_policy" "sql_cpu" {
+  display_name = "Cloud SQL CPU Utilization > 80%"
+  combiner     = "OR"
+  depends_on   = [google_project_service.apis]
+
+  conditions {
+    display_name = "SQL CPU above 80%"
+    condition_threshold {
+      filter          = "${local.sql_filter} AND metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\""
+      duration        = "600s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0.8
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "1800s" }
+}
+
+# ── Alert: Cloud SQL connections > 80 ────────────────────────────────────────
+resource "google_monitoring_alert_policy" "sql_connections" {
+  display_name = "Cloud SQL Connections > 80"
+  combiner     = "OR"
+  depends_on   = [google_project_service.apis]
+
+  conditions {
+    display_name = "Connection count above 80"
+    condition_threshold {
+      filter          = "${local.sql_filter} AND metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 80
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_MEAN"
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "1800s" }
+}
+
+# ── Log-based metric: BigQuery insert errors ──────────────────────────────────
+resource "google_logging_metric" "bq_insert_errors" {
+  name        = "chatbot/bq_insert_errors"
+  description = "Count of BigQuery insert errors logged by the chatbot service"
+  filter      = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"chatbot-service\" AND textPayload=~\"BigQuery insert errors\""
+  depends_on  = [google_project_service.apis]
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+# ── Alert: BQ insert errors ───────────────────────────────────────────────────
+resource "google_monitoring_alert_policy" "bq_insert_errors" {
+  display_name = "Chatbot BQ Insert Errors"
+  combiner     = "OR"
+  depends_on   = [google_logging_metric.bq_insert_errors, google_project_service.apis]
+
+  conditions {
+    display_name = "BQ insert error count > 0"
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/chatbot/bq_insert_errors\" AND resource.type=\"cloud_run_revision\""
+      duration        = "300s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 0
+      aggregations {
+        alignment_period   = "60s"
+        per_series_aligner = "ALIGN_RATE"
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "3600s" }
+}
+
+# ── Dashboard ─────────────────────────────────────────────────────────────────
+resource "google_monitoring_dashboard" "shopright" {
+  dashboard_json = jsonencode({
+    displayName = "ShopRight Operations"
+    mosaicLayout = {
+      columns = 12
+      tiles = [
+        # Row 1: Cloud Run request rate + 5xx rate
+        {
+          width = 6, height = 4, xPos = 0, yPos = 0
+          widget = {
+            title = "Chatbot Request Rate"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/request_count\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_RATE"
+                      crossSeriesReducer = "REDUCE_SUM"
+                      groupByFields = ["metric.labels.response_code_class"]
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        },
+        {
+          width = 6, height = 4, xPos = 6, yPos = 0
+          widget = {
+            title = "Chatbot p95 Latency (ms)"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/request_latencies\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_PERCENTILE_95"
+                      crossSeriesReducer = "REDUCE_MEAN"
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        },
+        # Row 2: Instance count + memory
+        {
+          width = 6, height = 4, xPos = 0, yPos = 4
+          widget = {
+            title = "Chatbot Instance Count"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/container/instance_count\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_MAX"
+                      crossSeriesReducer = "REDUCE_SUM"
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        },
+        {
+          width = 6, height = 4, xPos = 6, yPos = 4
+          widget = {
+            title = "Chatbot Memory Utilization"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/container/memory/utilizations\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_PERCENTILE_95"
+                      crossSeriesReducer = "REDUCE_MEAN"
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        },
+        # Row 3: Cloud SQL CPU + connections
+        {
+          width = 6, height = 4, xPos = 0, yPos = 8
+          widget = {
+            title = "Cloud SQL CPU Utilization"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "${local.sql_filter} AND metric.type=\"cloudsql.googleapis.com/database/cpu/utilization\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_MEAN"
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        },
+        {
+          width = 6, height = 4, xPos = 6, yPos = 8
+          widget = {
+            title = "Cloud SQL Active Connections"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "${local.sql_filter} AND metric.type=\"cloudsql.googleapis.com/database/postgresql/num_backends\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_MEAN"
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        },
+        # Row 4: BQ insert errors + Cloud SQL memory
+        {
+          width = 6, height = 4, xPos = 0, yPos = 12
+          widget = {
+            title = "BQ Insert Errors"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "metric.type=\"logging.googleapis.com/user/chatbot/bq_insert_errors\" AND resource.type=\"cloud_run_revision\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_RATE"
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        },
+        {
+          width = 6, height = 4, xPos = 6, yPos = 12
+          widget = {
+            title = "Cloud SQL Memory Utilization"
+            xyChart = {
+              dataSets = [{
+                timeSeriesQuery = {
+                  timeSeriesFilter = {
+                    filter = "${local.sql_filter} AND metric.type=\"cloudsql.googleapis.com/database/memory/utilization\""
+                    aggregation = {
+                      alignmentPeriod  = "60s"
+                      perSeriesAligner = "ALIGN_MEAN"
+                    }
+                  }
+                }
+                plotType = "LINE"
+              }]
+            }
+          }
+        }
+      ]
+    }
+  })
+  depends_on = [google_project_service.apis]
 }
