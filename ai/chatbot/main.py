@@ -957,6 +957,7 @@ async def chat_stream(request: ChatRequest):
             "dedup_removed_count": rag_meta.get("dedup_removed_count"),
             "unique_brands_count": rag_meta.get("unique_brands_count"),
             "unique_categories_count": rag_meta.get("unique_categories_count"),
+            "rerank_used": rag_meta.get("rerank_used"),
             "hallucination_flag": (len(raw_sources) > 0 and not any(
                 s["name"].lower() in full_response.lower() for s in raw_sources
             )) if raw_sources else None,
