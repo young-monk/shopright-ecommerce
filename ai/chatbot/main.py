@@ -143,6 +143,11 @@ def detect_unanswered(response: str, sources_count: int, history: list) -> bool:
     has_uncertainty = any(phrase in response_lower for phrase in UNCERTAINTY_PHRASES)
     return sources_count == 0 and has_uncertainty
 
+_SCOPE_REJECTION_MARKER = "i'm here to help with home improvement"
+
+def detect_scope_rejected(response: str) -> bool:
+    return _SCOPE_REJECTION_MARKER in response.lower()
+
 # ── Category keywords ─────────────────────────────────────────────────────────
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
     "Power Tools":            ["drill", "saw", "grinder", "sander", "router", "jigsaw", "circular saw", "impact driver", "nail gun", "heat gun", "power tool"],
@@ -301,7 +306,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             context_parts.append(row["content"])
             if row["doc_type"] == "product":
                 meta = json.loads(row["metadata"])
-                sources.append({"id": row["source_id"], "name": meta.get("name", ""), "price": float(meta.get("price", 0))})
+                sources.append({"id": row["source_id"], "name": meta.get("name", ""), "price": float(meta.get("price", 0)), "category": meta.get("category", "")})
 
         context = "\n\n---\n\n".join(context_parts)
         if low_confidence:
@@ -426,11 +431,13 @@ class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     history: Optional[List[ChatMessage]] = []  # used for seeding on pod restart
+    session_started_at: Optional[str] = None
 
 class ProductSource(BaseModel):
     id: str
     name: str
     price: float
+    category: str = ""
 
 class ChatResponse(BaseModel):
     response: str
@@ -450,6 +457,8 @@ class FeedbackRequest(BaseModel):
 class ReviewRequest(BaseModel):
     session_id: str
     stars: int
+    turn_count: Optional[int] = None
+    unanswered_count: Optional[int] = None
 
 class AnalyticsEventRequest(BaseModel):
     event_type: str
@@ -457,6 +466,8 @@ class AnalyticsEventRequest(BaseModel):
     message_id: Optional[str] = None
     product_id: Optional[str] = None
     product_name: Optional[str] = None
+    product_price: Optional[float] = None
+    product_category: Optional[str] = None
 
 # ── BigQuery logging ───────────────────────────────────────────────────────────
 async def log_to_bigquery(session_id, message_id, user_message, assistant_response, sources, latency_ms, is_unanswered, extra: dict | None = None):
@@ -480,18 +491,22 @@ async def log_to_bigquery(session_id, message_id, user_message, assistant_respon
     except Exception as e:
         logger.error(f"Failed to log to BigQuery: {e}")
 
-async def log_feedback_to_bigquery(message_id, session_id, rating, user_message, assistant_response):
+async def log_feedback_to_bigquery(message_id, session_id, rating, user_message, assistant_response, turn_number=None, detected_category=None):
     if not GCP_PROJECT:
         return
     try:
+        row = {
+            "message_id": message_id, "session_id": session_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "rating": rating, "user_message": user_message or "",
+            "assistant_response": assistant_response or "",
+        }
+        if turn_number is not None:
+            row["turn_number"] = turn_number
+        if detected_category is not None:
+            row["detected_category"] = detected_category
         bq = bigquery.Client(project=GCP_PROJECT)
-        bq.insert_rows_json(
-            f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_FEEDBACK_TABLE}",
-            [{"message_id": message_id, "session_id": session_id,
-              "timestamp": datetime.now(timezone.utc).isoformat(),
-              "rating": rating, "user_message": user_message or "",
-              "assistant_response": assistant_response or ""}],
-        )
+        bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_FEEDBACK_TABLE}", [row])
     except Exception as e:
         logger.error(f"Failed to log feedback to BigQuery: {e}")
 
@@ -669,6 +684,8 @@ async def chat_stream(request: ChatRequest):
             "ttft_ms": ttft_ms,
             "tokens_in": tokens_in, "tokens_out": tokens_out,
             "estimated_cost_usd": round(cost, 8) if cost else None,
+            "scope_rejected": detect_scope_rejected(full_response),
+            "session_started_at": request.session_started_at,
             "wellbeing_triggered": False,
             "dedup_removed_count": rag_meta.get("dedup_removed_count"),
             "unique_brands_count": rag_meta.get("unique_brands_count"),
@@ -742,9 +759,12 @@ async def chat(request: ChatRequest):
 async def feedback(request: FeedbackRequest):
     if request.rating not in (1, -1):
         raise HTTPException(status_code=400, detail="rating must be 1 (up) or -1 (down)")
+    metric = next((m for m in _req_metrics if m.get("message_id") == request.message_id), {})
     asyncio.create_task(log_feedback_to_bigquery(
         request.message_id, request.session_id, request.rating,
         request.user_message or "", request.assistant_response or "",
+        turn_number=metric.get("turn_number"),
+        detected_category=metric.get("detected_category"),
     ))
     return {"status": "ok"}
 
@@ -755,13 +775,17 @@ async def analytics_event(request: AnalyticsEventRequest):
         return {"status": "ok"}
     try:
         bq = bigquery.Client(project=GCP_PROJECT)
-        bq.insert_rows_json(
-            f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_EVENTS_TABLE}",
-            [{"event_type": request.event_type, "session_id": request.session_id,
-              "message_id": request.message_id or "", "product_id": request.product_id or "",
-              "product_name": request.product_name or "",
-              "timestamp": datetime.now(timezone.utc).isoformat()}],
-        )
+        row = {
+            "event_type": request.event_type, "session_id": request.session_id,
+            "message_id": request.message_id or "", "product_id": request.product_id or "",
+            "product_name": request.product_name or "",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if request.product_price is not None:
+            row["product_price"] = request.product_price
+        if request.product_category is not None:
+            row["product_category"] = request.product_category
+        bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_EVENTS_TABLE}", [row])
     except Exception as e:
         logger.error(f"Failed to log event to BigQuery: {e}")
     return {"status": "ok"}
@@ -774,11 +798,15 @@ async def review(request: ReviewRequest):
     if GCP_PROJECT:
         try:
             bq = bigquery.Client(project=GCP_PROJECT)
-            bq.insert_rows_json(
-                f"{GCP_PROJECT}.{BQ_DATASET}.session_reviews",
-                [{"session_id": request.session_id, "stars": request.stars,
-                  "timestamp": datetime.now(timezone.utc).isoformat()}],
-            )
+            review_row = {
+                "session_id": request.session_id, "stars": request.stars,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            if request.turn_count is not None:
+                review_row["turn_count"] = request.turn_count
+            if request.unanswered_count is not None:
+                review_row["unanswered_count"] = request.unanswered_count
+            bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.session_reviews", [review_row])
         except Exception as e:
             logger.error(f"Failed to log review to BigQuery: {e}")
     return {"status": "ok"}

@@ -11,6 +11,7 @@ interface ProductSource {
   id: string
   name: string
   price: number
+  category?: string
 }
 
 interface Message {
@@ -47,6 +48,8 @@ export function ChatbotWidget() {
   const [sessionEnded, setSessionEnded] = useState(false)
   const [reviewSubmitted, setReviewSubmitted] = useState(false)
   const [hoveredStar, setHoveredStar] = useState(0)
+  const [unansweredCount, setUnansweredCount] = useState(0)
+  const sessionStartedAt = useRef<string | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -57,6 +60,9 @@ export function ChatbotWidget() {
     if (!input.trim() || isLoading) return
 
     const userText = input
+    if (!sessionStartedAt.current) {
+      sessionStartedAt.current = new Date().toISOString()
+    }
     const userMessage: Message = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -85,6 +91,7 @@ export function ChatbotWidget() {
           message: userText,
           session_id: sessionId,
           history: messages.slice(-6).map(m => ({ role: m.role, content: m.content })),
+          session_started_at: sessionStartedAt.current,
         }),
       })
 
@@ -109,6 +116,7 @@ export function ChatbotWidget() {
             if (data.done) {
               // Final event — patch in metadata
               if (data.session_ending) setSessionEnded(true)
+              if (data.is_unanswered) setUnansweredCount(prev => prev + 1)
               setMessages(prev => prev.map(m =>
                 m.id === streamingId
                   ? {
@@ -172,6 +180,8 @@ export function ChatbotWidget() {
     setSessionEnded(false)
     setReviewSubmitted(false)
     setHoveredStar(0)
+    setUnansweredCount(0)
+    sessionStartedAt.current = null
     setInput('')
   }
 
@@ -185,6 +195,8 @@ export function ChatbotWidget() {
         message_id: messageId,
         product_id: source.id,
         product_name: source.name,
+        product_price: source.price,
+        product_category: source.category,
       }),
     }).catch(() => { /* non-critical */ })
   }
@@ -192,7 +204,13 @@ export function ChatbotWidget() {
   const submitReview = async (stars: number) => {
     setReviewSubmitted(true)
     try {
-      await axios.post(`${CHATBOT_URL}/review`, { session_id: sessionId, stars })
+      const turnCount = messages.filter(m => m.role === 'assistant' && m.id !== '0').length
+      await axios.post(`${CHATBOT_URL}/review`, {
+        session_id: sessionId,
+        stars,
+        turn_count: turnCount,
+        unanswered_count: unansweredCount,
+      })
     } catch {
       // non-critical
     }

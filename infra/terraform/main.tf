@@ -453,6 +453,9 @@ resource "google_bigquery_table" "chat_logs" {
     { name = "context_pct", type = "FLOAT", mode = "NULLABLE" },
     # Conversation
     { name = "turn_number", type = "INTEGER", mode = "NULLABLE" },
+    { name = "session_started_at", type = "TIMESTAMP", mode = "NULLABLE" },
+    { name = "scope_rejected", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "rerank_used", type = "BOOLEAN", mode = "NULLABLE" },
   ])
 
   time_partitioning {
@@ -472,6 +475,8 @@ resource "google_bigquery_table" "feedback" {
     { name = "rating", type = "INTEGER", mode = "REQUIRED" },
     { name = "user_message", type = "STRING", mode = "NULLABLE" },
     { name = "assistant_response", type = "STRING", mode = "NULLABLE" },
+    { name = "turn_number", type = "INTEGER", mode = "NULLABLE" },
+    { name = "detected_category", type = "STRING", mode = "NULLABLE" },
   ])
 
   time_partitioning {
@@ -491,6 +496,8 @@ resource "google_bigquery_table" "chat_events" {
     { name = "message_id", type = "STRING", mode = "NULLABLE" },
     { name = "product_id", type = "STRING", mode = "NULLABLE" },
     { name = "product_name", type = "STRING", mode = "NULLABLE" },
+    { name = "product_price", type = "FLOAT", mode = "NULLABLE" },
+    { name = "product_category", type = "STRING", mode = "NULLABLE" },
   ])
 
   time_partitioning {
@@ -507,6 +514,8 @@ resource "google_bigquery_table" "session_reviews" {
     { name = "session_id", type = "STRING", mode = "REQUIRED" },
     { name = "timestamp", type = "TIMESTAMP", mode = "REQUIRED" },
     { name = "stars", type = "INTEGER", mode = "REQUIRED" },
+    { name = "turn_count", type = "INTEGER", mode = "NULLABLE" },
+    { name = "unanswered_count", type = "INTEGER", mode = "NULLABLE" },
   ])
 
   time_partitioning {
