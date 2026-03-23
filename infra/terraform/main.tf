@@ -700,7 +700,7 @@ resource "google_monitoring_alert_policy" "chatbot_latency" {
       filter          = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/request_latencies\""
       duration        = "300s"
       comparison      = "COMPARISON_GT"
-      threshold_value = 10000  # milliseconds
+      threshold_value = 10000 # milliseconds
       aggregations {
         alignment_period     = "60s"
         per_series_aligner   = "ALIGN_PERCENTILE_99"
@@ -818,10 +818,10 @@ resource "google_monitoring_dashboard" "shopright" {
                   timeSeriesFilter = {
                     filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/request_count\""
                     aggregation = {
-                      alignmentPeriod  = "60s"
-                      perSeriesAligner = "ALIGN_RATE"
+                      alignmentPeriod    = "60s"
+                      perSeriesAligner   = "ALIGN_RATE"
                       crossSeriesReducer = "REDUCE_SUM"
-                      groupByFields = ["metric.labels.response_code_class"]
+                      groupByFields      = ["metric.labels.response_code_class"]
                     }
                   }
                 }
@@ -840,8 +840,8 @@ resource "google_monitoring_dashboard" "shopright" {
                   timeSeriesFilter = {
                     filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/request_latencies\""
                     aggregation = {
-                      alignmentPeriod  = "60s"
-                      perSeriesAligner = "ALIGN_PERCENTILE_95"
+                      alignmentPeriod    = "60s"
+                      perSeriesAligner   = "ALIGN_PERCENTILE_95"
                       crossSeriesReducer = "REDUCE_MEAN"
                     }
                   }
@@ -862,8 +862,8 @@ resource "google_monitoring_dashboard" "shopright" {
                   timeSeriesFilter = {
                     filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/container/instance_count\""
                     aggregation = {
-                      alignmentPeriod  = "60s"
-                      perSeriesAligner = "ALIGN_MAX"
+                      alignmentPeriod    = "60s"
+                      perSeriesAligner   = "ALIGN_MAX"
                       crossSeriesReducer = "REDUCE_SUM"
                     }
                   }
@@ -883,8 +883,8 @@ resource "google_monitoring_dashboard" "shopright" {
                   timeSeriesFilter = {
                     filter = "${local.chatbot_filter} AND metric.type=\"run.googleapis.com/container/memory/utilizations\""
                     aggregation = {
-                      alignmentPeriod  = "60s"
-                      perSeriesAligner = "ALIGN_PERCENTILE_95"
+                      alignmentPeriod    = "60s"
+                      perSeriesAligner   = "ALIGN_PERCENTILE_95"
                       crossSeriesReducer = "REDUCE_MEAN"
                     }
                   }
