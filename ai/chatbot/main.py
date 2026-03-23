@@ -49,6 +49,15 @@ BQ_FEEDBACK_TABLE = os.getenv("BIGQUERY_FEEDBACK_TABLE", "feedback")
 BQ_EVENTS_TABLE   = os.getenv("BIGQUERY_EVENTS_TABLE", "chat_events")
 COHERE_API_KEY    = os.getenv("COHERE_API_KEY", "")
 
+# Gemini client for lightweight async classification calls (intent, target extraction)
+_genai_client = None
+if GEMINI_API_KEY:
+    try:
+        import google.genai as _genai_lib
+        _genai_client = _genai_lib.Client(api_key=GEMINI_API_KEY)
+    except Exception:
+        pass
+
 # Cohere rerank client (optional — graceful fallback if key not set)
 _co = None
 if COHERE_API_KEY:
@@ -198,6 +207,38 @@ def detect_prompt_injection(message: str) -> tuple[bool, str | None]:
     for pattern, label in _INJECTION_PATTERNS:
         if re.search(pattern, msg_lower):
             return True, label
+    return False, None
+
+# ── Frustration detection ─────────────────────────────────────────────────────
+_FRUSTRATION_PATTERNS: list[tuple[str, str]] = [
+    (r"\b(never mind|nevermind|forget it|forget that)\b",                    "giving_up"),
+    (r"\bnot (what i|what I) (needed|wanted|asked|meant|was looking for)\b", "mismatch"),
+    (r"\bthat'?s? (not (right|helpful|correct|what i|it)|wrong)\b",         "rejection"),
+    (r"\b(useless|not helpful|unhelpful|doesn'?t help)\b",                  "unhelpful"),
+    (r"\bjust (search|look|find) (it |myself|on my own)",                   "abandoning"),
+    (r"\bno[,.]?\s+(not that|that'?s? not)\b",                              "rejection"),
+    (r"\b(wrong product|wrong item|not the right)\b",                       "mismatch"),
+]
+
+# Last user message per session — for repeated-rephrase detection
+_session_prev_message: dict[str, str] = {}
+
+def detect_frustration(message: str, session_id: str, prev_was_unanswered: bool) -> tuple[bool, str | None]:
+    msg_lower = message.lower()
+    for pattern, label in _FRUSTRATION_PATTERNS:
+        if re.search(pattern, msg_lower):
+            return True, label
+    # Repeated rephrase: Jaccard word overlap > 60% with previous turn
+    prev = _session_prev_message.get(session_id, "")
+    if prev:
+        prev_words = set(prev.lower().split())
+        curr_words = set(msg_lower.split())
+        if len(prev_words) > 2 and len(curr_words) > 2:
+            overlap = len(prev_words & curr_words) / len(prev_words | curr_words)
+            if overlap > 0.6:
+                return True, "repeated_rephrase"
+    if prev_was_unanswered:
+        return True, "after_unanswered"
     return False, None
 
 # ── Category keywords ─────────────────────────────────────────────────────────
@@ -521,7 +562,7 @@ class AnalyticsEventRequest(BaseModel):
     product_price: Optional[float] = None
     product_category: Optional[str] = None
 
-# ── Intent classification ──────────────────────────────────────────────────────
+# ── Intent classification + target extraction ─────────────────────────────────
 _INTENT_LABELS = (
     "product_lookup",       # searching for a specific product
     "project_advice",       # how-to / DIY project guidance
@@ -535,14 +576,18 @@ _INTENT_PROMPT = (
     + ", ".join(_INTENT_LABELS)
     + "\n\nRespond with only the label — no explanation.\n\nMessage: "
 )
+_TARGET_PROMPT = (
+    "Extract the specific product, material, or topic the customer is asking about in 1-5 words. "
+    "Examples: 'cordless drill', 'deck lumber', 'garbage disposal', 'bathroom tile', 'paint primer'. "
+    "If the message is general or a greeting, respond with 'general'. "
+    "Respond with only the extracted term — no explanation.\n\nMessage: "
+)
 
 async def classify_intent(message: str) -> str:
-    if not GEMINI_API_KEY:
+    if not _genai_client:
         return "unknown"
     try:
-        import google.genai as genai
-        _cl = genai.Client(api_key=GEMINI_API_KEY)
-        resp = await _cl.aio.models.generate_content(
+        resp = await _genai_client.aio.models.generate_content(
             model="gemini-2.0-flash-lite",
             contents=_INTENT_PROMPT + message[:500],
         )
@@ -552,12 +597,58 @@ async def classify_intent(message: str) -> str:
         logger.warning(f"Intent classification failed: {e}")
         return "unknown"
 
+async def extract_intent_target(message: str) -> str:
+    if not _genai_client:
+        return ""
+    try:
+        resp = await _genai_client.aio.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=_TARGET_PROMPT + message[:500],
+        )
+        return resp.text.strip()[:100]
+    except Exception as e:
+        logger.warning(f"Intent target extraction failed: {e}")
+        return ""
+
+def compute_rec_gap(user_intent_target: str, sources: list, is_unanswered: bool) -> bool:
+    """True when the bot surfaced products but none matched what the user wanted."""
+    if not user_intent_target or user_intent_target.lower() in ("general", ""):
+        return False
+    if is_unanswered:
+        return True
+    if not sources:
+        return False
+    target_words = set(user_intent_target.lower().split())
+    for s in sources:
+        name = (s.get("name", "") if isinstance(s, dict) else getattr(s, "name", "")).lower()
+        if any(w in name for w in target_words):
+            return False
+    return True
+
 # ── BigQuery logging ───────────────────────────────────────────────────────────
 async def log_to_bigquery(session_id, message_id, user_message, assistant_response, sources, latency_ms, is_unanswered, extra: dict | None = None):
     if not GCP_PROJECT:
         return
     try:
-        intent = await classify_intent(user_message)
+        # Derive: previous turn unanswered (for frustration detection)
+        prev_unanswered = next(
+            (m.get("is_unanswered", False) for m in reversed(_req_metrics)
+             if m.get("session_id") == session_id and m.get("message_id") != message_id),
+            False,
+        )
+        frustration_signal, frustration_reason = detect_frustration(user_message, session_id, prev_unanswered)
+
+        # Batch the two Gemini classification calls
+        intent, user_intent_target = await asyncio.gather(
+            classify_intent(user_message),
+            extract_intent_target(user_message),
+        )
+
+        rec_gap = compute_rec_gap(user_intent_target, sources, is_unanswered)
+
+        # Update sliding prev-message window after classification
+        _session_prev_message[session_id] = user_message
+
         row = {
             "session_id": session_id, "message_id": message_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -566,6 +657,10 @@ async def log_to_bigquery(session_id, message_id, user_message, assistant_respon
             "message_length": len(user_message), "response_length": len(assistant_response),
             "sources_count": len(sources), "latency_ms": latency_ms, "is_unanswered": is_unanswered,
             "intent": intent,
+            "frustration_signal": frustration_signal,
+            "frustration_reason": frustration_reason,
+            "user_intent_target": user_intent_target,
+            "rec_gap": rec_gap,
         }
         if extra:
             row.update(extra)
