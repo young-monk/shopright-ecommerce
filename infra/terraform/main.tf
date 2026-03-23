@@ -458,6 +458,8 @@ resource "google_bigquery_table" "chat_logs" {
     { name = "session_started_at", type = "TIMESTAMP", mode = "NULLABLE" },
     { name = "scope_rejected", type = "BOOLEAN", mode = "NULLABLE" },
     { name = "rerank_used", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "prompt_injection_flag", type = "BOOLEAN", mode = "NULLABLE" },
+    { name = "injection_pattern", type = "STRING", mode = "NULLABLE" },
   ])
 
   time_partitioning {
@@ -980,4 +982,170 @@ resource "google_monitoring_dashboard" "shopright" {
     }
   })
   depends_on = [google_project_service.apis]
+}
+
+# ── Chatbot service data source (for uptime check host) ───────────────────────
+data "google_cloud_run_v2_service" "chatbot_svc" {
+  name     = "chatbot-service"
+  location = var.region
+}
+
+# ── Uptime check: chatbot /health ─────────────────────────────────────────────
+resource "google_monitoring_uptime_check_config" "chatbot_health" {
+  display_name = "Chatbot /health"
+  timeout      = "10s"
+  period       = "60s"
+
+  http_check {
+    path         = "/health"
+    port         = 443
+    use_ssl      = true
+    validate_ssl = true
+  }
+
+  monitored_resource {
+    type = "uptime_url"
+    labels = {
+      project_id = var.project_id
+      host       = replace(data.google_cloud_run_v2_service.chatbot_svc.uri, "https://", "")
+    }
+  }
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_monitoring_alert_policy" "chatbot_uptime" {
+  display_name = "Chatbot Health Check Failing"
+  combiner     = "OR"
+  depends_on   = [google_monitoring_uptime_check_config.chatbot_health]
+
+  conditions {
+    display_name = "Uptime check failing"
+    condition_threshold {
+      filter          = "resource.type=\"uptime_url\" AND metric.type=\"monitoring.googleapis.com/uptime_check/check_passed\" AND metric.labels.check_id=\"${google_monitoring_uptime_check_config.chatbot_health.uptime_check_id}\""
+      duration        = "120s"
+      comparison      = "COMPARISON_LT"
+      threshold_value = 1
+      aggregations {
+        alignment_period     = "60s"
+        per_series_aligner   = "ALIGN_NEXT_OLDER"
+        cross_series_reducer = "REDUCE_COUNT_FALSE"
+        group_by_fields      = ["resource.*"]
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "1800s" }
+}
+
+# ── Log-based metrics ─────────────────────────────────────────────────────────
+resource "google_logging_metric" "injection_attempts" {
+  name        = "chatbot/injection_attempts"
+  description = "Prompt injection attempts detected by the chatbot"
+  filter      = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"chatbot-service\" AND textPayload=~\"\\[injection\\]\""
+  depends_on  = [google_project_service.apis]
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "rate_limit_hits" {
+  name        = "chatbot/rate_limit_hits"
+  description = "Requests blocked by per-session rate limiter"
+  filter      = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"chatbot-service\" AND textPayload=~\"\\[rate_limit\\]\""
+  depends_on  = [google_project_service.apis]
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+resource "google_logging_metric" "cohere_errors" {
+  name        = "chatbot/cohere_errors"
+  description = "Cohere rerank failures (key expiry / quota)"
+  filter      = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"chatbot-service\" AND textPayload=~\"Cohere rerank failed\""
+  depends_on  = [google_project_service.apis]
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+}
+
+# ── Alert: injection spike ────────────────────────────────────────────────────
+resource "google_monitoring_alert_policy" "injection_spike" {
+  display_name = "Chatbot Injection Attempts Spike"
+  combiner     = "OR"
+  depends_on   = [google_logging_metric.injection_attempts]
+
+  conditions {
+    display_name = "Injection attempts > 5 in 5 min"
+    condition_threshold {
+      filter          = "resource.type=\"cloud_run_revision\" AND metric.type=\"logging.googleapis.com/user/chatbot/injection_attempts\""
+      duration        = "0s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 5
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "3600s" }
+}
+
+# ── Alert: request flood ──────────────────────────────────────────────────────
+resource "google_monitoring_alert_policy" "rate_limit_flood" {
+  display_name = "Chatbot Request Flood"
+  combiner     = "OR"
+  depends_on   = [google_logging_metric.rate_limit_hits]
+
+  conditions {
+    display_name = "Rate limit hits > 20 in 5 min"
+    condition_threshold {
+      filter          = "resource.type=\"cloud_run_revision\" AND metric.type=\"logging.googleapis.com/user/chatbot/rate_limit_hits\""
+      duration        = "0s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 20
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "1800s" }
+}
+
+# ── Alert: Cohere key expiry / quota ─────────────────────────────────────────
+resource "google_monitoring_alert_policy" "cohere_errors_alert" {
+  display_name = "Cohere Rerank Errors"
+  combiner     = "OR"
+  depends_on   = [google_logging_metric.cohere_errors]
+
+  conditions {
+    display_name = "Cohere errors > 3 in 5 min"
+    condition_threshold {
+      filter          = "resource.type=\"cloud_run_revision\" AND metric.type=\"logging.googleapis.com/user/chatbot/cohere_errors\""
+      duration        = "0s"
+      comparison      = "COMPARISON_GT"
+      threshold_value = 3
+      aggregations {
+        alignment_period   = "300s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+    }
+  }
+
+  notification_channels = local.notification_channels
+  alert_strategy { auto_close = "3600s" }
 }

@@ -76,6 +76,33 @@ _cv_message_id: contextvars.ContextVar[str] = contextvars.ContextVar("message_id
 _sources_store: dict[str, list] = {}
 _rag_meta_store: dict[str, dict] = {}
 
+# ── Per-session rate limiter ──────────────────────────────────────────────────
+class _RateLimiter:
+    """Sliding-window in-memory rate limiter. One instance per process."""
+    def __init__(self, max_requests: int, window_seconds: int):
+        self.max_requests   = max_requests
+        self.window_seconds = window_seconds
+        self._buckets: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, key: str) -> bool:
+        now    = time.monotonic()
+        cutoff = now - self.window_seconds
+        self._buckets[key] = [t for t in self._buckets[key] if t > cutoff]
+        if len(self._buckets[key]) >= self.max_requests:
+            return False
+        self._buckets[key].append(now)
+        return True
+
+    def cleanup(self) -> None:
+        """Evict keys with no recent requests."""
+        now    = time.monotonic()
+        cutoff = now - self.window_seconds
+        stale  = [k for k, ts in self._buckets.items() if not any(t > cutoff for t in ts)]
+        for k in stale:
+            del self._buckets[k]
+
+_session_limiter = _RateLimiter(max_requests=30, window_seconds=600)  # 30 req / 10 min per session
+
 # ── Session ending detection ──────────────────────────────────────────────────
 SESSION_END_PHRASES = [
     "thanks", "thank you", "that's all", "that's it", "i'm done", "im done",
@@ -147,6 +174,29 @@ _SCOPE_REJECTION_MARKER = "i'm here to help with home improvement"
 
 def detect_scope_rejected(response: str) -> bool:
     return _SCOPE_REJECTION_MARKER in response.lower()
+
+# ── Prompt injection detection ────────────────────────────────────────────────
+_INJECTION_PATTERNS: list[tuple[str, str]] = [
+    (r"ignore\s+(all\s+)?previous\s+instructions?",                 "ignore_instructions"),
+    (r"(disregard|forget)\s+(your\s+)?(previous\s+)?instructions?", "disregard_instructions"),
+    (r"you\s+are\s+now\s+(a|an|the)\s+",                           "persona_override"),
+    (r"act\s+as\s+(a|an|the)\s+(?!store|sales|product|shop)",      "act_as"),
+    (r"pretend\s+(you\s+are|to\s+be)\s+",                          "pretend_as"),
+    (r"\b(jailbreak|dan\s+mode|do\s+anything\s+now)\b",            "jailbreak"),
+    (r"reveal\s+(your\s+)?(system\s+)?(prompt|instructions?)",      "extract_prompt"),
+    (r"what\s+(are|were)\s+your\s+(system\s+)?instructions?",       "extract_prompt"),
+    (r"override\s+(your\s+)?(safety|guidelines?|instructions?)",    "safety_override"),
+]
+_INJECTION_MSG_MAX_LEN = 4000
+
+def detect_prompt_injection(message: str) -> tuple[bool, str | None]:
+    if len(message) > _INJECTION_MSG_MAX_LEN:
+        return True, "message_too_long"
+    msg_lower = message.lower()
+    for pattern, label in _INJECTION_PATTERNS:
+        if re.search(pattern, msg_lower):
+            return True, label
+    return False, None
 
 # ── Category keywords ─────────────────────────────────────────────────────────
 CATEGORY_KEYWORDS: dict[str, list[str]] = {
@@ -542,11 +592,47 @@ async def health():
     return {"status": "healthy", "service": "chatbot", "embed_model": embed_model_name()}
 
 
+@app.get("/health/deep")
+async def health_deep():
+    """Deep health check — tests DB connectivity and reports API key status."""
+    checks: dict[str, str] = {}
+    overall = "healthy"
+
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.fetchval("SELECT 1")
+        await conn.close()
+        checks["database"] = "ok"
+    except Exception as e:
+        checks["database"] = f"error: {str(e)[:120]}"
+        overall = "degraded"
+
+    checks["gemini_key"]     = "configured" if GEMINI_API_KEY else "missing"
+    checks["cohere_rerank"]  = "enabled" if _co else "disabled"
+    if not GEMINI_API_KEY:
+        overall = "degraded"
+
+    if overall != "healthy":
+        logger.warning(f"[health_deep] status={overall} checks={checks}")
+
+    return {"status": overall, "service": "chatbot", "checks": checks}
+
+
 @app.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     """SSE streaming endpoint using ADK runner. Yields tokens then a final metadata event."""
     session_id = request.session_id or str(uuid.uuid4())
     message_id = str(uuid.uuid4())
+
+    # Rate limit: 30 requests per 10 minutes per session
+    if not _session_limiter.is_allowed(session_id):
+        logger.warning(f"[rate_limit] session={session_id}")
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
+
+    # Prompt injection detection (flag + log; Gemini safety handles actual refusal)
+    is_injection, injection_pattern = detect_prompt_injection(request.message)
+    if is_injection:
+        logger.warning(f"[injection] pattern={injection_pattern} session={session_id}")
 
     async def generate():
         t0 = time.monotonic()
@@ -686,6 +772,8 @@ async def chat_stream(request: ChatRequest):
             "estimated_cost_usd": round(cost, 8) if cost else None,
             "scope_rejected": detect_scope_rejected(full_response),
             "session_started_at": request.session_started_at,
+            "prompt_injection_flag": is_injection,
+            "injection_pattern": injection_pattern,
             "wellbeing_triggered": False,
             "dedup_removed_count": rag_meta.get("dedup_removed_count"),
             "unique_brands_count": rag_meta.get("unique_brands_count"),
@@ -723,6 +811,15 @@ async def chat(request: ChatRequest):
     history = request.history or []
 
     await _ensure_session(session_id, history)
+
+    if not _session_limiter.is_allowed(session_id):
+        logger.warning(f"[rate_limit] session={session_id}")
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
+
+    is_injection, injection_pattern = detect_prompt_injection(request.message)
+    if is_injection:
+        logger.warning(f"[injection] pattern={injection_pattern} session={session_id}")
+
     _cv_message_id.set(message_id)
     _sources_store.pop(message_id, None)
 
@@ -747,7 +844,8 @@ async def chat(request: ChatRequest):
     latency_ms = 0  # not tracked for non-streaming
 
     asyncio.create_task(log_to_bigquery(
-        session_id, message_id, request.message, full_response, final_sources, latency_ms, is_unanswered
+        session_id, message_id, request.message, full_response, final_sources, latency_ms, is_unanswered,
+        extra={"prompt_injection_flag": is_injection, "injection_pattern": injection_pattern},
     ))
 
     sources_out = [ProductSource(id=s["id"], name=s["name"], price=s["price"]) for s in final_sources]
