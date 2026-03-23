@@ -180,11 +180,39 @@ def detect_unanswered(response: str, sources_count: int, history: list) -> bool:
     return sources_count == 0 and has_uncertainty
 
 _INJECTION_RESPONSE = "I'm ShopRight's home improvement assistant and I'm not able to help with that request. Is there something around the house I can help you with?"
+_VULGAR_RESPONSE    = "That's not something I'm able to help with. I'm ShopRight's home improvement assistant — is there a project or product I can help you find?"
 
 _SCOPE_REJECTION_MARKER = "i'm here to help with home improvement"
 
 def detect_scope_rejected(response: str) -> bool:
     return _SCOPE_REJECTION_MARKER in response.lower()
+
+# ── Vulgar / sexual content detection ────────────────────────────────────────
+_VULGAR_PATTERNS: list[tuple[str, str]] = [
+    (r"\b(porn|pornography|xxx|onlyfans)\b",                        "pornography"),
+    (r"\b(naked|nude|nudity|nudes)\b",                              "nudity"),
+    (r"\b(sex|sexual|sexually|intercourse|foreplay)\b",             "sexual"),
+    (r"\b(masturbat\w+|orgasm|ejaculat\w+)\b",                      "explicit_sexual"),
+    (r"\b(erotic|erotica|fetish|bdsm|kink\w*)\b",                   "explicit_sexual"),
+    (r"\b(fuck|fucking|fucked|fucker|fucks)\b",                     "profanity"),
+    (r"\bc[u\*]nt\b",                                               "profanity"),
+    (r"\bcock\b(?!\s*(pit|roach|tail|erel|atoo))",                  "sexual"),
+    (r"\bdick\b(?!\s*(ens|inson|son))",                             "sexual"),
+    (r"\bpussy\b(?!\s*(cat|willow|foot))",                          "sexual"),
+    (r"\bash+ole\b",                                                 "profanity"),
+    (r"\bwhor[e\b]",                                                 "profanity"),
+    (r"\bslut\b",                                                    "profanity"),
+    (r"\b(have sex|sleep with|hook up) with you\b",                 "sexual_solicitation"),
+    (r"\bshow me your (body|breasts?|genitals?)\b",                 "sexual_solicitation"),
+    (r"\bsend (me )?(nudes?|naked|sexy) (pics?|photos?|pictures?)", "sexual_solicitation"),
+]
+
+def detect_vulgar(message: str) -> tuple[bool, str | None]:
+    msg_lower = message.lower()
+    for pattern, label in _VULGAR_PATTERNS:
+        if re.search(pattern, msg_lower):
+            return True, label
+    return False, None
 
 # ── Prompt injection detection ────────────────────────────────────────────────
 _INJECTION_PATTERNS: list[tuple[str, str]] = [
@@ -772,6 +800,19 @@ async def chat_stream(request: ChatRequest):
             ))
         return StreamingResponse(_blocked(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
+    # Vulgar / sexual content — hard-block before reaching the LLM
+    is_vulgar, vulgar_pattern = detect_vulgar(request.message)
+    if is_vulgar:
+        logger.warning(f"[vulgar] pattern={vulgar_pattern} session={session_id}")
+        async def _vulgar_blocked():
+            yield f"data: {json.dumps({'token': _VULGAR_RESPONSE, 'done': False})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': False})}\n\n"
+            asyncio.create_task(log_to_bigquery(
+                session_id, message_id, request.message, _VULGAR_RESPONSE, [], 0, False,
+                extra={"vulgar_flag": True, "vulgar_pattern": vulgar_pattern},
+            ))
+        return StreamingResponse(_vulgar_blocked(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
+
     async def generate():
         t0 = time.monotonic()
         history = request.history or []
@@ -962,6 +1003,16 @@ async def chat(request: ChatRequest):
             extra={"prompt_injection_flag": True, "injection_pattern": injection_pattern},
         ))
         return ChatResponse(response=_INJECTION_RESPONSE, session_id=session_id,
+                            message_id=message_id, sources=[], is_unanswered=False)
+
+    is_vulgar, vulgar_pattern = detect_vulgar(request.message)
+    if is_vulgar:
+        logger.warning(f"[vulgar] pattern={vulgar_pattern} session={session_id}")
+        asyncio.create_task(log_to_bigquery(
+            session_id, message_id, request.message, _VULGAR_RESPONSE, [], 0, False,
+            extra={"vulgar_flag": True, "vulgar_pattern": vulgar_pattern},
+        ))
+        return ChatResponse(response=_VULGAR_RESPONSE, session_id=session_id,
                             message_id=message_id, sources=[], is_unanswered=False)
 
     _cv_message_id.set(message_id)
