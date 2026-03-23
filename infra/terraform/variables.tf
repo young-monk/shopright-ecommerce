@@ -51,3 +51,10 @@ variable "alert_email" {
   type        = string
   default     = ""
 }
+
+variable "cohere_api_key" {
+  description = "Cohere API key for rerank-v3.5"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

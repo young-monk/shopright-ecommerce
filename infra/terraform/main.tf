@@ -305,6 +305,10 @@ resource "google_cloud_run_v2_service" "chatbot" {
         name  = "GEMINI_API_KEY"
         value = var.gemini_api_key
       }
+      env {
+        name  = "COHERE_API_KEY"
+        value = var.cohere_api_key
+      }
       resources {
         limits = { cpu = "2", memory = "2Gi" }
       }

@@ -51,6 +51,7 @@ jobs:
             -var="db_password=${{ secrets.DB_PASSWORD }}" \
             -var="jwt_secret=${{ secrets.JWT_SECRET }}" \
             -var="gemini_api_key=${{ secrets.GEMINI_API_KEY }}" \
+            -var="cohere_api_key=${{ secrets.COHERE_API_KEY }}" \
             -var-file="prod.tfvars" \
             -no-color -out=tfplan
         continue-on-error: true
