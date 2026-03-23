@@ -35,6 +35,11 @@ from google.genai.types import Content, Part
 
 from embed import embed as gemini_embed, preload as preload_embed, model_name as embed_model_name
 
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -57,6 +62,20 @@ if GEMINI_API_KEY:
         _genai_client = _genai_lib.Client(api_key=GEMINI_API_KEY)
     except Exception:
         pass
+
+# ── OpenTelemetry / Cloud Trace ───────────────────────────────────────────────
+_tracer_provider = TracerProvider()
+if GCP_PROJECT:
+    try:
+        from opentelemetry.exporter.cloud_trace import CloudTraceSpanExporter
+        _tracer_provider.add_span_processor(
+            BatchSpanProcessor(CloudTraceSpanExporter(project_id=GCP_PROJECT))
+        )
+        logger.info("Cloud Trace exporter enabled")
+    except Exception as e:
+        logger.warning(f"Cloud Trace exporter init failed: {e}")
+trace.set_tracer_provider(_tracer_provider)
+_tracer = trace.get_tracer("shopright.chatbot")
 
 # Cohere rerank client (optional — graceful fallback if key not set)
 _co = None
@@ -315,7 +334,10 @@ def extract_price_limit(query: str) -> float | None:
 # ── RAG: knowledge_embeddings hybrid search ───────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, dict]:
     """Search knowledge_embeddings with hybrid ANN + optional Cohere rerank."""
-    vector, embed_ms = await gemini_embed(query, task_type="RETRIEVAL_QUERY")
+    with _tracer.start_as_current_span("embed_query") as span:
+        span.set_attribute("query_length", len(query))
+        vector, embed_ms = await gemini_embed(query, task_type="RETRIEVAL_QUERY")
+        span.set_attribute("embed_ms", embed_ms or 0)
     if not vector:
         return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False,
                         "price_filter_value": None, "detected_category": None, "embed_ms": None, "db_ms": None}
@@ -330,7 +352,6 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
 
     try:
         conn = await asyncpg.connect(DATABASE_URL)
-        t_db = time.monotonic()
 
         # Build optional filter clauses
         # Price filter: metadata->>'price' is text in JSONB; cast to numeric
@@ -346,22 +367,29 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
         # Fetch more candidates when rerank is available (50), else use top_k directly
         ann_limit = 50 if _co else top_k
 
-        # Query all three doc types — use halfvec cast to hit the HNSW index
-        # (pgvector's vector(3072) exceeds the 2000-dim ANN limit; halfvec lifts it to 16000)
-        rows = await conn.fetch(
-            f"""
-            SELECT doc_type, source_id, content, metadata,
-                   (embedding::halfvec(3072) <=> $1::halfvec(3072)) AS vec_dist,
-                   {keyword_bonus} AS keyword_bonus
-            FROM knowledge_embeddings
-            WHERE 1=1 {cat_clause} {price_clause}
-            ORDER BY (embedding::halfvec(3072) <=> $1::halfvec(3072)) - {keyword_bonus}
-            LIMIT $2
-            """,
-            str(vector), ann_limit,
-        )
+        with _tracer.start_as_current_span("vector_search") as span:
+            span.set_attribute("ann_limit", ann_limit)
+            span.set_attribute("price_filter", price_limit is not None)
+            span.set_attribute("category_filter", detected_category or "")
+            t_db = time.monotonic()
+            # Query all three doc types — use halfvec cast to hit the HNSW index
+            # (pgvector's vector(3072) exceeds the 2000-dim ANN limit; halfvec lifts it to 16000)
+            rows = await conn.fetch(
+                f"""
+                SELECT doc_type, source_id, content, metadata,
+                       (embedding::halfvec(3072) <=> $1::halfvec(3072)) AS vec_dist,
+                       {keyword_bonus} AS keyword_bonus
+                FROM knowledge_embeddings
+                WHERE 1=1 {cat_clause} {price_clause}
+                ORDER BY (embedding::halfvec(3072) <=> $1::halfvec(3072)) - {keyword_bonus}
+                LIMIT $2
+                """,
+                str(vector), ann_limit,
+            )
+            db_ms = int((time.monotonic() - t_db) * 1000)
+            span.set_attribute("candidates_returned", len(rows))
+            span.set_attribute("db_ms", db_ms)
 
-        db_ms = int((time.monotonic() - t_db) * 1000)
         await conn.close()
 
         ann_candidates_count = len(rows) if rows else 0
@@ -381,18 +409,25 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
         # ── Rerank ────────────────────────────────────────────────────────────
         rerank_used = False
         if _co and rows:
-            try:
-                rr = _co.rerank(
-                    query=query,
-                    documents=[r["content"] for r in rows],
-                    top_n=min(16, len(rows)),
-                    model="rerank-v3.5",
-                )
-                reranked_rows = [rows[hit.index] for hit in rr.results]
-                rerank_used = True
-            except Exception as e:
-                logger.warning(f"Cohere rerank failed, falling back to hybrid score: {e}")
-                reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
+            with _tracer.start_as_current_span("cohere_rerank") as span:
+                top_n = min(16, len(rows))
+                span.set_attribute("candidates_in", len(rows))
+                span.set_attribute("top_n", top_n)
+                try:
+                    rr = _co.rerank(
+                        query=query,
+                        documents=[r["content"] for r in rows],
+                        top_n=top_n,
+                        model="rerank-v3.5",
+                    )
+                    reranked_rows = [rows[hit.index] for hit in rr.results]
+                    rerank_used = True
+                    span.set_attribute("rerank_used", True)
+                except Exception as e:
+                    logger.warning(f"Cohere rerank failed, falling back to hybrid score: {e}")
+                    reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
+                    span.set_attribute("rerank_used", False)
+                    span.set_attribute("error", str(e))
         else:
             reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
 
@@ -538,6 +573,7 @@ _runner = Runner(
 
 # ── FastAPI app ────────────────────────────────────────────────────────────────
 app = FastAPI(title="ShopRight Chatbot", version="3.0.0")
+FastAPIInstrumentor.instrument_app(app)
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
@@ -875,47 +911,56 @@ async def chat_stream(request: ChatRequest):
         ttft_ms = None
         first_token = True
 
-        try:
-            new_message = Content(role="user", parts=[Part(text=request.message)])
-            async for event in _runner.run_async(
-                user_id="anon",
-                session_id=session_id,
-                new_message=new_message,
-            ):
-                if not event.content or not event.content.parts:
-                    continue
-
-                # Skip tool call / tool response events
-                has_function = any(
-                    hasattr(p, "function_call") and p.function_call
-                    or hasattr(p, "function_response") and p.function_response
-                    for p in event.content.parts
-                )
-                if has_function:
-                    # Record when the tool ran (RAG timing)
-                    if rag_ms is None:
-                        rag_ms = int((time.monotonic() - t_llm) * 1000)
-                    continue
-
-                # Extract text parts from LLM response
-                for part in event.content.parts:
-                    text = getattr(part, "text", None)
-                    if not text:
+        with _tracer.start_as_current_span("llm_generate") as llm_span:
+            llm_span.set_attribute("session_id", session_id)
+            llm_span.set_attribute("turn_number", turn_number)
+            llm_span.set_attribute("model", LLM_MODEL)
+            try:
+                new_message = Content(role="user", parts=[Part(text=request.message)])
+                async for event in _runner.run_async(
+                    user_id="anon",
+                    session_id=session_id,
+                    new_message=new_message,
+                ):
+                    if not event.content or not event.content.parts:
                         continue
-                    if first_token:
-                        ttft_ms = int((time.monotonic() - t_llm) * 1000)
-                        first_token = False
-                    full_response += text
-                    yield f"data: {json.dumps({'token': text, 'done': False})}\n\n"
 
-        except Exception as e:
-            logger.error(f"ADK runner error: {e}")
-            llm_error_type = str(type(e).__name__)
-            err_msg = "Sorry, I encountered an error. Please try again."
-            full_response = err_msg
-            yield f"data: {json.dumps({'token': err_msg, 'done': False})}\n\n"
+                    # Skip tool call / tool response events
+                    has_function = any(
+                        hasattr(p, "function_call") and p.function_call
+                        or hasattr(p, "function_response") and p.function_response
+                        for p in event.content.parts
+                    )
+                    if has_function:
+                        # Record when the tool ran (RAG timing)
+                        if rag_ms is None:
+                            rag_ms = int((time.monotonic() - t_llm) * 1000)
+                        continue
 
-        llm_ms = int((time.monotonic() - t_llm) * 1000)
+                    # Extract text parts from LLM response
+                    for part in event.content.parts:
+                        text = getattr(part, "text", None)
+                        if not text:
+                            continue
+                        if first_token:
+                            ttft_ms = int((time.monotonic() - t_llm) * 1000)
+                            first_token = False
+                        full_response += text
+                        yield f"data: {json.dumps({'token': text, 'done': False})}\n\n"
+
+            except Exception as e:
+                logger.error(f"ADK runner error: {e}")
+                llm_error_type = str(type(e).__name__)
+                err_msg = "Sorry, I encountered an error. Please try again."
+                full_response = err_msg
+                llm_span.set_attribute("error", llm_error_type)
+                yield f"data: {json.dumps({'token': err_msg, 'done': False})}\n\n"
+
+            llm_ms = int((time.monotonic() - t_llm) * 1000)
+            llm_span.set_attribute("llm_ms", llm_ms)
+            llm_span.set_attribute("ttft_ms", ttft_ms or 0)
+            llm_span.set_attribute("tokens_in", tokens_in or 0)
+            llm_span.set_attribute("tokens_out", tokens_out or 0)
         latency_ms = int((time.monotonic() - t0) * 1000)
 
         # Retrieve sources written by search_products tool (via module-level store)

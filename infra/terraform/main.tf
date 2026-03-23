@@ -35,6 +35,7 @@ resource "google_project_service" "apis" {
     "servicenetworking.googleapis.com",
     "monitoring.googleapis.com",
     "logging.googleapis.com",
+    "cloudtrace.googleapis.com",
   ])
   service            = each.key
   disable_on_destroy = false
@@ -674,6 +675,12 @@ resource "google_project_iam_member" "chatbot_vertex" {
 resource "google_project_iam_member" "chatbot_bigquery" {
   project = var.project_id
   role    = "roles/bigquery.dataEditor"
+  member  = "serviceAccount:${google_service_account.chatbot_sa.email}"
+}
+
+resource "google_project_iam_member" "chatbot_trace" {
+  project = var.project_id
+  role    = "roles/cloudtrace.agent"
   member  = "serviceAccount:${google_service_account.chatbot_sa.email}"
 }
 
