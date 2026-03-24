@@ -58,3 +58,39 @@ variable "cohere_api_key" {
   sensitive   = true
   default     = ""
 }
+
+variable "analytics_devops_email" {
+  description = "Recipient email for weekly DevOps analytics report"
+  type        = string
+  default     = "hallyalasridhar@gmail.com"
+}
+
+variable "analytics_tech_email" {
+  description = "Recipient email for weekly Technical analytics report"
+  type        = string
+  default     = "hallyalasridhar@gmail.com"
+}
+
+variable "analytics_business_email" {
+  description = "Recipient email for weekly Business analytics report"
+  type        = string
+  default     = "hallyalasridhar@gmail.com"
+}
+
+variable "looker_studio_devops_url" {
+  description = "Looker Studio dashboard URL for DevOps audience (optional)"
+  type        = string
+  default     = ""
+}
+
+variable "looker_studio_tech_url" {
+  description = "Looker Studio dashboard URL for Technical audience (optional)"
+  type        = string
+  default     = ""
+}
+
+variable "looker_studio_business_url" {
+  description = "Looker Studio dashboard URL for Business audience (optional)"
+  type        = string
+  default     = ""
+}

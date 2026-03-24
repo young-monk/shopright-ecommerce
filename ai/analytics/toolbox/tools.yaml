@@ -1,0 +1,1151 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# ShopRight Analytics — MCP Toolbox for Databases
+# BigQuery named queries organised into three toolsets:
+#   devops    → 12 tools for engineering/on-call
+#   tech      → 15 tools for ML engineers / technical stakeholders
+#   business  → 18 tools for product managers / executives
+# ─────────────────────────────────────────────────────────────────────────────
+
+sources:
+  chat-analytics:
+    kind: bigquery
+    project: ${PROJECT_ID}
+
+toolsets:
+  devops:
+    - get_devops_daily
+    - get_devops_summary
+    - get_devops_latency_percentiles
+    - get_devops_ttft_trend
+    - get_devops_error_types
+    - get_devops_security_events
+    - get_devops_unanswered_trend
+    - get_devops_scope_rejections
+    - get_devops_session_activity
+    - get_devops_recent_errors
+    - get_devops_cold_start_proxy
+    - get_devops_weekly_comparison
+
+  tech:
+    - get_tech_rag_daily
+    - get_tech_rag_summary
+    - get_tech_embedding_quality
+    - get_tech_token_cost_daily
+    - get_tech_cost_summary
+    - get_tech_intent_distribution
+    - get_tech_frustration_trend
+    - get_tech_catalog_gaps
+    - get_tech_rerank_impact
+    - get_tech_hallucination_rate
+    - get_tech_rec_gap_analysis
+    - get_tech_context_window_pct
+    - get_tech_category_performance
+    - get_tech_query_rewrite_rate
+    - get_tech_dedup_stats
+
+  business:
+    - get_business_satisfaction_daily
+    - get_business_satisfaction_summary
+    - get_business_feedback_summary
+    - get_business_chip_clicks_daily
+    - get_business_top_products
+    - get_business_session_outcomes
+    - get_business_conversion_funnel
+    - get_business_intent_split
+    - get_business_frustration_impact
+    - get_business_rec_gap_impact
+    - get_business_category_demand
+    - get_business_session_length_dist
+    - get_business_outcome_by_intent
+    - get_business_unanswered_impact
+    - get_business_positive_sessions
+    - get_business_weekly_volume
+    - get_business_engagement_score
+    - get_business_satisfaction_by_category
+
+# ─── DevOps tools ─────────────────────────────────────────────────────────────
+
+tools:
+
+  get_devops_daily:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily request volume, error rate, p50/p95 latency, TTFT,
+      unanswered rate, vulgar blocks, and injection blocks for the last N days.
+      Use for daily trend charts in DevOps reports.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include (e.g. 7, 14, 30).
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS requests,
+        COUNT(DISTINCT session_id)                                                  AS sessions,
+        COUNTIF(llm_error = TRUE)                                                   AS errors,
+        ROUND(SAFE_DIVIDE(COUNTIF(llm_error=TRUE)*100.0, COUNT(*)), 2)             AS error_rate_pct,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(50)] AS INT64)                AS p50_latency_ms,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)                AS p95_latency_ms,
+        CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                    AS avg_ttft_ms,
+        CAST(APPROX_QUANTILES(COALESCE(ttft_ms,0),100)[OFFSET(95)] AS INT64)      AS p95_ttft_ms,
+        ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)         AS unanswered_rate_pct,
+        COUNTIF(vulgar_flag = TRUE)                                                 AS vulgar_blocks,
+        COUNTIF(prompt_injection_flag = TRUE)                                       AS injection_blocks
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_summary:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Single-row summary of DevOps KPIs for the last N days:
+      total requests, sessions, error rate, p50/p95 latency, avg TTFT,
+      unanswered rate, vulgar blocks, injection blocks.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        COUNT(*)                                                                    AS total_requests,
+        COUNT(DISTINCT session_id)                                                  AS total_sessions,
+        COUNTIF(llm_error = TRUE)                                                   AS total_errors,
+        ROUND(SAFE_DIVIDE(COUNTIF(llm_error=TRUE)*100.0, COUNT(*)), 2)             AS error_rate_pct,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(50)] AS INT64)                AS p50_latency_ms,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)                AS p95_latency_ms,
+        CAST(AVG(latency_ms) AS INT64)                                              AS avg_latency_ms,
+        CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                    AS avg_ttft_ms,
+        CAST(APPROX_QUANTILES(COALESCE(ttft_ms,0),100)[OFFSET(95)] AS INT64)      AS p95_ttft_ms,
+        ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)         AS unanswered_rate_pct,
+        COUNTIF(vulgar_flag = TRUE)                                                 AS total_vulgar_blocks,
+        COUNTIF(prompt_injection_flag = TRUE)                                       AS total_injection_blocks
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+
+  get_devops_latency_percentiles:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily p25/p50/p75/p95/p99 response latency breakdown.
+      Use to understand latency distribution shifts over time.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(25)] AS INT64)                AS p25_ms,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(50)] AS INT64)                AS p50_ms,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(75)] AS INT64)                AS p75_ms,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)                AS p95_ms,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(99)] AS INT64)                AS p99_ms
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_ttft_trend:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily average and p95 time-to-first-token (TTFT) trend.
+      High TTFT means the LLM is slow to start generating; useful to correlate
+      with Gemini API latency incidents.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                    AS avg_ttft_ms,
+        CAST(APPROX_QUANTILES(COALESCE(ttft_ms,0),100)[OFFSET(95)] AS INT64)      AS p95_ttft_ms,
+        CAST(AVG(COALESCE(llm_ms,0)) AS INT64)                                     AS avg_llm_ms
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_error_types:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Error type breakdown — which LLM error types occurred most frequently.
+      Use to identify recurring failure modes (quota, timeout, model errors).
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        COALESCE(llm_error_type, 'unknown')                                         AS error_type,
+        COUNT(*)                                                                    AS count,
+        ROUND(COUNT(*)*100.0 / SUM(COUNT(*)) OVER(), 2)                            AS pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        AND llm_error = TRUE
+      GROUP BY error_type
+      ORDER BY count DESC
+
+  get_devops_security_events:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily count of prompt injection attempts and vulgar/sexual content blocks.
+      Use to detect attack spikes or abuse patterns.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNTIF(prompt_injection_flag = TRUE)                                       AS injection_attempts,
+        COUNTIF(vulgar_flag = TRUE)                                                 AS vulgar_blocks,
+        ARRAY_AGG(DISTINCT injection_pattern IGNORE NULLS LIMIT 5)                 AS top_injection_patterns
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_unanswered_trend:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily unanswered message rate. High unanswered rate suggests catalog gaps
+      or RAG retrieval failures.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS total_messages,
+        COUNTIF(is_unanswered = TRUE)                                               AS unanswered,
+        ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)         AS unanswered_rate_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_scope_rejections:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily count of out-of-scope messages rejected by the chatbot.
+      Use to understand how often users ask off-topic questions.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS total,
+        COUNTIF(scope_rejected = TRUE)                                              AS scope_rejections,
+        ROUND(SAFE_DIVIDE(COUNTIF(scope_rejected=TRUE)*100.0, COUNT(*)), 2)        AS rejection_rate_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_session_activity:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily session activity: unique sessions, avg turns per session,
+      avg message and response length. Use to detect unusual traffic patterns.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(DISTINCT session_id)                                                  AS sessions,
+        ROUND(AVG(turn_number), 1)                                                  AS avg_turn_number,
+        CAST(AVG(message_length) AS INT64)                                          AS avg_message_length,
+        CAST(AVG(response_length) AS INT64)                                         AS avg_response_length
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_recent_errors:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      The 20 most recent LLM errors with session, timestamp, and error type.
+      Use when investigating a specific error spike.
+    parameters:
+      - name: hours
+        type: integer
+        description: How many hours back to look (e.g. 24, 48).
+    statement: |
+      SELECT
+        message_id,
+        session_id,
+        timestamp,
+        COALESCE(llm_error_type, 'unknown')                                         AS error_type,
+        LEFT(user_message, 120)                                                     AS user_message_preview
+      FROM `chat_analytics.chat_logs`
+      WHERE llm_error = TRUE
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @hours HOUR)
+      ORDER BY timestamp DESC
+      LIMIT 20
+
+  get_devops_cold_start_proxy:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Sessions where the first-turn TTFT was > 5 seconds, a proxy for cold starts.
+      High first-turn latency indicates Cloud Run is scaling from zero.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS slow_first_turns,
+        CAST(AVG(ttft_ms) AS INT64)                                                 AS avg_ttft_ms
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        AND turn_number = 1
+        AND ttft_ms > 5000
+      GROUP BY date
+      ORDER BY date
+
+  get_devops_weekly_comparison:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Week-over-week comparison: this week vs prior week for key DevOps metrics.
+      Returns two rows: current_week and prior_week.
+    parameters: []
+    statement: |
+      WITH weeks AS (
+        SELECT
+          CASE WHEN timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+               THEN 'current_week' ELSE 'prior_week' END                            AS period,
+          *
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)
+      )
+      SELECT
+        period,
+        COUNT(*)                                                                    AS requests,
+        COUNT(DISTINCT session_id)                                                  AS sessions,
+        ROUND(SAFE_DIVIDE(COUNTIF(llm_error=TRUE)*100.0, COUNT(*)), 2)             AS error_rate_pct,
+        CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)                AS p95_latency_ms,
+        ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)         AS unanswered_rate_pct
+      FROM weeks
+      GROUP BY period
+      ORDER BY period DESC
+
+# ─── Tech tools ───────────────────────────────────────────────────────────────
+
+  get_tech_rag_daily:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily RAG quality metrics: avg confidence score, min vector distance,
+      avg ANN candidate count, rerank usage rate.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        ROUND(AVG(COALESCE(rag_confidence,0)), 4)                                   AS avg_rag_confidence,
+        ROUND(AVG(COALESCE(min_vec_distance,0)), 4)                                 AS avg_min_vec_distance,
+        CAST(AVG(COALESCE(ann_candidates_count,0)) AS INT64)                        AS avg_ann_candidates,
+        ROUND(SAFE_DIVIDE(COUNTIF(rerank_used=TRUE)*100.0, COUNT(*)), 2)           AS rerank_used_pct,
+        ROUND(SAFE_DIVIDE(COUNTIF(rag_empty=TRUE)*100.0, COUNT(*)), 2)             AS rag_empty_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_tech_rag_summary:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Period summary of RAG quality: avg/min/max confidence, vector distance stats,
+      rerank usage, hallucination rate, empty RAG rate.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        ROUND(AVG(COALESCE(rag_confidence,0)), 4)                                   AS avg_rag_confidence,
+        ROUND(MIN(COALESCE(rag_confidence,0)), 4)                                   AS min_rag_confidence,
+        ROUND(MAX(COALESCE(rag_confidence,0)), 4)                                   AS max_rag_confidence,
+        ROUND(AVG(COALESCE(min_vec_distance,0)), 4)                                 AS avg_min_vec_distance,
+        ROUND(MIN(COALESCE(min_vec_distance,0)), 4)                                 AS best_vec_distance,
+        ROUND(SAFE_DIVIDE(COUNTIF(rerank_used=TRUE)*100.0, COUNT(*)), 2)           AS rerank_used_pct,
+        ROUND(SAFE_DIVIDE(COUNTIF(rag_empty=TRUE)*100.0, COUNT(*)), 2)             AS rag_empty_pct,
+        ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag=TRUE)*100.0, COUNT(*)), 2)    AS hallucination_rate_pct,
+        CAST(AVG(COALESCE(sources_count,0)) AS INT64)                               AS avg_sources_retrieved
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+
+  get_tech_embedding_quality:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily embedding quality signal: avg, p10, p90 min-vector-distance.
+      Lower distance = embeddings are semantically closer to retrieved docs = better retrieval.
+      A rising trend indicates embedding drift or catalog quality degradation.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        ROUND(AVG(COALESCE(min_vec_distance,0)), 4)                                 AS avg_distance,
+        ROUND(APPROX_QUANTILES(COALESCE(min_vec_distance,0),10)[OFFSET(1)], 4)     AS p10_distance,
+        ROUND(APPROX_QUANTILES(COALESCE(min_vec_distance,0),10)[OFFSET(9)], 4)     AS p90_distance
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        AND min_vec_distance IS NOT NULL
+      GROUP BY date
+      ORDER BY date
+
+  get_tech_token_cost_daily:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily token usage (tokens_in, tokens_out) and LLM cost in USD.
+      Use to track cost trends and budget consumption.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        CAST(SUM(COALESCE(tokens_in,0)) AS INT64)                                   AS total_tokens_in,
+        CAST(SUM(COALESCE(tokens_out,0)) AS INT64)                                  AS total_tokens_out,
+        CAST(AVG(COALESCE(tokens_in,0)) AS INT64)                                   AS avg_tokens_in,
+        CAST(AVG(COALESCE(tokens_out,0)) AS INT64)                                  AS avg_tokens_out,
+        ROUND(SUM(COALESCE(estimated_cost_usd,0)), 6)                               AS cost_usd
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_tech_cost_summary:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Period cost summary: total USD spent, cost per session, cost per 1k requests,
+      total tokens in/out. Use for budget planning and cost efficiency analysis.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        ROUND(SUM(COALESCE(estimated_cost_usd,0)), 4)                               AS total_cost_usd,
+        ROUND(SAFE_DIVIDE(SUM(COALESCE(estimated_cost_usd,0)),
+              COUNT(DISTINCT session_id)), 6)                                        AS cost_per_session_usd,
+        ROUND(SAFE_DIVIDE(SUM(COALESCE(estimated_cost_usd,0)), COUNT(*))*1000, 4)  AS cost_per_1k_requests_usd,
+        CAST(SUM(COALESCE(tokens_in,0)) AS INT64)                                   AS total_tokens_in,
+        CAST(SUM(COALESCE(tokens_out,0)) AS INT64)                                  AS total_tokens_out,
+        COUNT(DISTINCT session_id)                                                   AS sessions
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+
+  get_tech_intent_distribution:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Distribution of user intent labels: product_search, price_comparison,
+      how_to_use, complaint, DIY_advice, general_info, unknown.
+      Use to understand what users are asking about most.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        COALESCE(intent, 'unknown')                                                 AS intent,
+        COUNT(*)                                                                    AS count,
+        ROUND(COUNT(*)*100.0 / SUM(COUNT(*)) OVER(), 2)                            AS pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY intent
+      ORDER BY count DESC
+
+  get_tech_frustration_trend:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily frustration detection rate and frustration reason breakdown.
+      High frustration rate is a strong signal of chatbot quality issues.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS messages,
+        COUNTIF(frustration_signal = TRUE)                                          AS frustrated,
+        ROUND(SAFE_DIVIDE(COUNTIF(frustration_signal=TRUE)*100.0, COUNT(*)), 2)    AS frustration_rate_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_tech_catalog_gaps:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Top unanswered queries — what users ask that the product catalog cannot answer.
+      These are the most important signals for catalog enrichment.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+      - name: limit
+        type: integer
+        description: Max number of rows to return (e.g. 20).
+    statement: |
+      SELECT
+        user_message,
+        COALESCE(detected_category, 'Unknown')                                      AS category,
+        COUNT(*)                                                                    AS frequency,
+        ROUND(AVG(COALESCE(rag_confidence, 0)), 4)                                  AS avg_rag_confidence
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        AND is_unanswered = TRUE
+      GROUP BY user_message, category
+      ORDER BY frequency DESC
+      LIMIT @limit
+
+  get_tech_rerank_impact:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Comparison of RAG confidence when rerank was used vs not used.
+      Use to measure the value of Cohere reranking.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        rerank_used,
+        COUNT(*)                                                                    AS messages,
+        ROUND(AVG(COALESCE(rag_confidence,0)), 4)                                   AS avg_rag_confidence,
+        ROUND(AVG(COALESCE(min_vec_distance,0)), 4)                                 AS avg_vec_distance,
+        ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)         AS unanswered_rate_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY rerank_used
+      ORDER BY rerank_used DESC
+
+  get_tech_hallucination_rate:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily hallucination flag rate — turns where the response referenced products
+      not in the retrieved sources.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS messages,
+        COUNTIF(hallucination_flag = TRUE)                                          AS hallucinations,
+        ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag=TRUE)*100.0, COUNT(*)), 2)    AS hallucination_rate_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_tech_rec_gap_analysis:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Sessions where the recommendation gap flag fired — user asked for a specific
+      product type but the bot recommended something different. Grouped by intent.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        COALESCE(intent, 'unknown')                                                 AS intent,
+        COUNT(*)                                                                    AS total,
+        COUNTIF(rec_gap = TRUE)                                                     AS rec_gap_count,
+        ROUND(SAFE_DIVIDE(COUNTIF(rec_gap=TRUE)*100.0, COUNT(*)), 2)               AS rec_gap_rate_pct,
+        ARRAY_AGG(user_intent_target IGNORE NULLS LIMIT 5)                         AS sample_targets
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY intent
+      ORDER BY rec_gap_count DESC
+
+  get_tech_context_window_pct:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Distribution of context_pct (how much of the LLM context window was used).
+      High context usage risks truncation; use to tune context window budget.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        ROUND(AVG(COALESCE(context_pct,0)), 3)                                      AS avg_context_pct,
+        ROUND(APPROX_QUANTILES(COALESCE(context_pct,0),100)[OFFSET(95)], 3)        AS p95_context_pct,
+        ROUND(MAX(COALESCE(context_pct,0)), 3)                                      AS max_context_pct,
+        COUNTIF(COALESCE(context_pct,0) > 0.9)                                      AS near_limit_count
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+
+  get_tech_category_performance:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Per-category RAG performance: request count, unanswered rate, avg confidence.
+      Use to identify which product categories have the worst coverage.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        COALESCE(detected_category, 'General')                                      AS category,
+        COUNT(*)                                                                    AS requests,
+        COUNTIF(is_unanswered = TRUE)                                               AS unanswered,
+        ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)         AS unanswered_rate_pct,
+        ROUND(AVG(COALESCE(rag_confidence,0)), 4)                                   AS avg_rag_confidence,
+        ROUND(AVG(COALESCE(min_vec_distance,0)), 4)                                 AS avg_vec_distance
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY category
+      ORDER BY requests DESC
+
+  get_tech_query_rewrite_rate:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily rate of query rewrites (when the chatbot reformulated the user's query
+      before embedding). Compare rewritten vs original query RAG quality.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS total,
+        COUNTIF(query_rewritten = TRUE)                                             AS rewritten_count,
+        ROUND(SAFE_DIVIDE(COUNTIF(query_rewritten=TRUE)*100.0, COUNT(*)), 2)       AS rewrite_rate_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_tech_dedup_stats:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily deduplication stats: avg products removed by dedup, unique brands/categories.
+      Use to understand catalog diversity in retrieved results.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        CAST(AVG(COALESCE(dedup_removed_count,0)) AS INT64)                         AS avg_dedup_removed,
+        CAST(AVG(COALESCE(unique_brands_count,0)) AS INT64)                         AS avg_unique_brands,
+        CAST(AVG(COALESCE(unique_categories_count,0)) AS INT64)                     AS avg_unique_categories
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+# ─── Business tools ────────────────────────────────────────────────────────────
+
+  get_business_satisfaction_daily:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily average star rating and review count. Use for satisfaction trend charts.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        ROUND(AVG(stars), 2)                                                        AS avg_stars,
+        COUNT(*)                                                                    AS review_count,
+        COUNTIF(stars >= 4)                                                         AS positive_count,
+        COUNTIF(stars <= 2)                                                         AS negative_count
+      FROM `chat_analytics.session_reviews`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_business_satisfaction_summary:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Overall satisfaction summary for the period: avg stars, total reviews,
+      positive/negative review counts and rates.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        ROUND(AVG(stars), 2)                                                        AS avg_stars,
+        COUNT(*)                                                                    AS total_reviews,
+        COUNTIF(stars >= 4)                                                         AS positive_reviews,
+        COUNTIF(stars <= 2)                                                         AS negative_reviews,
+        ROUND(SAFE_DIVIDE(COUNTIF(stars>=4)*100.0, COUNT(*)), 2)                   AS positive_rate_pct,
+        ROUND(SAFE_DIVIDE(COUNTIF(stars<=2)*100.0, COUNT(*)), 2)                   AS negative_rate_pct
+      FROM `chat_analytics.session_reviews`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+
+  get_business_feedback_summary:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Per-message thumbs up/down feedback summary for the period.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        COUNTIF(rating = 1)                                                         AS thumbs_up,
+        COUNTIF(rating = -1)                                                        AS thumbs_down,
+        COUNT(*)                                                                    AS total_feedback,
+        ROUND(SAFE_DIVIDE(COUNTIF(rating=1)*100.0, COUNT(*)), 2)                   AS positive_rate_pct
+      FROM `chat_analytics.feedback`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+
+  get_business_chip_clicks_daily:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Daily product chip-click counts — the primary conversion signal showing
+      users clicking through to product pages from chatbot recommendations.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        DATE(timestamp)                                                             AS date,
+        COUNT(*)                                                                    AS chip_clicks,
+        COUNT(DISTINCT session_id)                                                  AS sessions_with_clicks
+      FROM `chat_analytics.chat_events`
+      WHERE event_type = 'chip_click'
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY date
+      ORDER BY date
+
+  get_business_top_products:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Top products by chip-click engagement. Use to identify which products
+      the chatbot drives the most traffic to.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+      - name: limit
+        type: integer
+        description: Max number of products to return (e.g. 10).
+    statement: |
+      SELECT
+        product_name,
+        COUNT(*)                                                                    AS clicks,
+        COUNT(DISTINCT session_id)                                                  AS unique_sessions
+      FROM `chat_analytics.chat_events`
+      WHERE event_type = 'chip_click'
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        AND product_name IS NOT NULL
+      GROUP BY product_name
+      ORDER BY clicks DESC
+      LIMIT @limit
+
+  get_business_session_outcomes:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Session outcome distribution (success / failure / inconclusive) from the
+      session_outcomes BQ view. Key business health metric.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        outcome,
+        COUNT(*)                                                                    AS sessions,
+        ROUND(COUNT(*)*100.0 / SUM(COUNT(*)) OVER(), 2)                            AS pct
+      FROM `chat_analytics.session_outcomes`
+      WHERE session_end_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY outcome
+      ORDER BY sessions DESC
+
+  get_business_conversion_funnel:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Conversion funnel: total sessions vs sessions with at least one chip click.
+      Use to compute chatbot-driven product engagement rate.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH sessions AS (
+        SELECT DISTINCT session_id
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      ),
+      clicked AS (
+        SELECT DISTINCT session_id
+        FROM `chat_analytics.chat_events`
+        WHERE event_type = 'chip_click'
+          AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      )
+      SELECT
+        COUNT(s.session_id)                                                         AS total_sessions,
+        COUNT(c.session_id)                                                         AS sessions_with_click,
+        ROUND(SAFE_DIVIDE(COUNT(c.session_id)*100.0, COUNT(s.session_id)), 2)      AS click_through_rate_pct
+      FROM sessions s
+      LEFT JOIN clicked c ON s.session_id = c.session_id
+
+  get_business_intent_split:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Split of product_search vs DIY_advice vs other intents.
+      Use to understand the mix of customers vs DIY users.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        CASE
+          WHEN intent = 'product_search'   THEN 'Product Search'
+          WHEN intent = 'DIY_advice'       THEN 'DIY Advice'
+          WHEN intent = 'price_comparison' THEN 'Price Comparison'
+          WHEN intent = 'how_to_use'       THEN 'How-To / Install'
+          WHEN intent = 'complaint'        THEN 'Complaint'
+          WHEN intent = 'general_info'     THEN 'General Info'
+          ELSE 'Other / Unknown'
+        END                                                                         AS intent_label,
+        COUNT(*)                                                                    AS count,
+        ROUND(COUNT(*)*100.0 / SUM(COUNT(*)) OVER(), 2)                            AS pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY intent_label
+      ORDER BY count DESC
+
+  get_business_frustration_impact:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Impact of frustration on session outcomes: compare avg star rating and
+      outcome distribution for frustrated vs non-frustrated sessions.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH frustrated_sessions AS (
+        SELECT
+          session_id,
+          COUNTIF(frustration_signal = TRUE) >= 1                                   AS had_frustration
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY session_id
+      )
+      SELECT
+        had_frustration,
+        COUNT(DISTINCT r.session_id)                                                AS sessions,
+        ROUND(AVG(r.stars), 2)                                                      AS avg_stars,
+        ROUND(SAFE_DIVIDE(COUNTIF(r.stars >= 4)*100.0, COUNT(*)), 2)               AS positive_rate_pct
+      FROM frustrated_sessions f
+      JOIN `chat_analytics.session_reviews` r ON r.session_id = f.session_id
+      GROUP BY had_frustration
+
+  get_business_rec_gap_impact:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Impact of recommendation gaps on satisfaction: sessions with rec_gap flag
+      vs sessions without, comparing avg stars.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH rec_gap_sessions AS (
+        SELECT
+          session_id,
+          COUNTIF(rec_gap = TRUE) >= 1                                              AS had_rec_gap
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY session_id
+      )
+      SELECT
+        had_rec_gap,
+        COUNT(DISTINCT r.session_id)                                                AS sessions,
+        ROUND(AVG(r.stars), 2)                                                      AS avg_stars
+      FROM rec_gap_sessions rg
+      JOIN `chat_analytics.session_reviews` r ON r.session_id = rg.session_id
+      GROUP BY had_rec_gap
+
+  get_business_category_demand:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Most queried product categories by message volume. Use to align catalog
+      investments with actual customer demand.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        COALESCE(detected_category, 'Unknown')                                      AS category,
+        COUNT(*)                                                                    AS queries,
+        COUNT(DISTINCT session_id)                                                  AS unique_sessions,
+        ROUND(COUNT(*)*100.0 / SUM(COUNT(*)) OVER(), 2)                            AS query_share_pct
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY category
+      ORDER BY queries DESC
+      LIMIT 15
+
+  get_business_session_length_dist:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Distribution of session lengths (turn counts). Helps understand how deep
+      users go in conversations — short sessions may indicate drop-off.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH session_turns AS (
+        SELECT session_id, MAX(turn_number) AS max_turn
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY session_id
+      )
+      SELECT
+        CASE
+          WHEN max_turn = 1 THEN '1 turn'
+          WHEN max_turn BETWEEN 2 AND 3 THEN '2-3 turns'
+          WHEN max_turn BETWEEN 4 AND 6 THEN '4-6 turns'
+          WHEN max_turn BETWEEN 7 AND 10 THEN '7-10 turns'
+          ELSE '11+ turns'
+        END                                                                         AS session_depth,
+        COUNT(*)                                                                    AS sessions,
+        ROUND(COUNT(*)*100.0 / SUM(COUNT(*)) OVER(), 2)                            AS pct
+      FROM session_turns
+      GROUP BY session_depth
+      ORDER BY MIN(max_turn)
+
+  get_business_outcome_by_intent:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Session outcome (success/failure/inconclusive) broken down by the most
+      common user intent in that session. Use to find which intent types
+      have the worst outcomes.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH session_intent AS (
+        SELECT
+          session_id,
+          APPROX_TOP_COUNT(intent, 1)[OFFSET(0)].value                             AS dominant_intent
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY session_id
+      )
+      SELECT
+        COALESCE(si.dominant_intent, 'unknown')                                     AS intent,
+        o.outcome,
+        COUNT(*)                                                                    AS sessions
+      FROM session_intent si
+      JOIN `chat_analytics.session_outcomes` o ON o.session_id = si.session_id
+      WHERE o.session_end_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+      GROUP BY intent, outcome
+      ORDER BY intent, sessions DESC
+
+  get_business_unanswered_impact:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Average satisfaction for sessions with high unanswered rate vs sessions
+      with low unanswered rate. Quantifies the business cost of catalog gaps.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH session_quality AS (
+        SELECT
+          session_id,
+          ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE), COUNT(*)), 2)             AS unanswered_rate
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY session_id
+      )
+      SELECT
+        CASE
+          WHEN unanswered_rate = 0      THEN 'No unanswered'
+          WHEN unanswered_rate < 0.25   THEN '1-25% unanswered'
+          WHEN unanswered_rate < 0.50   THEN '26-50% unanswered'
+          ELSE '50%+ unanswered'
+        END                                                                         AS unanswered_bucket,
+        COUNT(DISTINCT sq.session_id)                                               AS sessions,
+        ROUND(AVG(r.stars), 2)                                                      AS avg_stars
+      FROM session_quality sq
+      LEFT JOIN `chat_analytics.session_reviews` r ON r.session_id = sq.session_id
+      GROUP BY unanswered_bucket
+      ORDER BY MIN(unanswered_rate)
+
+  get_business_positive_sessions:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Sample of successful sessions (star rating >= 4 or chip click) with their
+      dominant intent and turn count. Use to understand what makes sessions succeed.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      SELECT
+        o.session_id,
+        o.star_rating,
+        o.turn_count,
+        o.had_chip_click,
+        o.frustrated_turns
+      FROM `chat_analytics.session_outcomes` o
+      WHERE o.session_end_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        AND o.outcome = 'success'
+      ORDER BY o.star_rating DESC, o.turn_count DESC
+      LIMIT 20
+
+  get_business_weekly_volume:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Weekly session and message volume trend. Use for week-over-week growth analysis.
+    parameters:
+      - name: weeks
+        type: integer
+        description: Number of past weeks to include (e.g. 8 for 2 months).
+    statement: |
+      SELECT
+        DATE_TRUNC(DATE(timestamp), WEEK)                                           AS week_start,
+        COUNT(*)                                                                    AS messages,
+        COUNT(DISTINCT session_id)                                                  AS sessions
+      FROM `chat_analytics.chat_logs`
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @weeks * 7 DAY)
+      GROUP BY week_start
+      ORDER BY week_start
+
+  get_business_engagement_score:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Composite weekly engagement score: combines chip-click rate, avg stars,
+      session depth, and low frustration rate into a single 0-100 score.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH base AS (
+        SELECT
+          l.session_id,
+          MAX(l.turn_number)                                                        AS depth,
+          COUNTIF(l.frustration_signal = TRUE)                                      AS frustrated_turns,
+          MAX(CASE WHEN e.event_type = 'chip_click' THEN 1 ELSE 0 END)             AS clicked,
+          MAX(r.stars)                                                              AS stars
+        FROM `chat_analytics.chat_logs` l
+        LEFT JOIN `chat_analytics.chat_events` e
+               ON e.session_id = l.session_id
+              AND e.event_type = 'chip_click'
+              AND e.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        LEFT JOIN `chat_analytics.session_reviews` r ON r.session_id = l.session_id
+        WHERE l.timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY l.session_id
+      )
+      SELECT
+        COUNT(*)                                                                    AS sessions,
+        ROUND(SAFE_DIVIDE(COUNTIF(clicked=1)*100.0, COUNT(*)), 2)                  AS click_rate_pct,
+        ROUND(AVG(COALESCE(stars,3)), 2)                                            AS avg_stars,
+        ROUND(AVG(depth), 1)                                                        AS avg_depth,
+        ROUND(SAFE_DIVIDE(COUNTIF(frustrated_turns>0)*100.0, COUNT(*)), 2)         AS frustration_rate_pct,
+        ROUND(
+          (SAFE_DIVIDE(COUNTIF(clicked=1)*100.0, COUNT(*)) * 0.30) +
+          (SAFE_DIVIDE(AVG(COALESCE(stars,3)) - 1, 4) * 100 * 0.40) +
+          ((100 - SAFE_DIVIDE(COUNTIF(frustrated_turns>0)*100.0, COUNT(*))) * 0.30)
+        , 1)                                                                        AS engagement_score_0_100
+      FROM base
+
+  get_business_satisfaction_by_category:
+    kind: bigquery-sql
+    source: chat-analytics
+    description: >
+      Average satisfaction (stars) broken down by product category queried.
+      Use to identify which product lines drive the best/worst user satisfaction.
+    parameters:
+      - name: days
+        type: integer
+        description: Number of past days to include.
+    statement: |
+      WITH session_category AS (
+        SELECT
+          session_id,
+          APPROX_TOP_COUNT(detected_category, 1)[OFFSET(0)].value                  AS top_category
+        FROM `chat_analytics.chat_logs`
+        WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL @days DAY)
+        GROUP BY session_id
+      )
+      SELECT
+        COALESCE(sc.top_category, 'Unknown')                                        AS category,
+        COUNT(DISTINCT r.session_id)                                                AS reviews,
+        ROUND(AVG(r.stars), 2)                                                      AS avg_stars
+      FROM session_category sc
+      JOIN `chat_analytics.session_reviews` r ON r.session_id = sc.session_id
+      GROUP BY category
+      HAVING COUNT(DISTINCT r.session_id) >= 3
+      ORDER BY avg_stars DESC

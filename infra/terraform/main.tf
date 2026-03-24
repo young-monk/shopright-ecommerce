@@ -634,8 +634,36 @@ resource "google_cloud_run_v2_service" "analytics" {
 
   template {
     service_account = google_service_account.analytics_sa.email
+
+    # ── MCP Toolbox sidecar ────────────────────────────────────────────────
+    # Runs on port 5000 (internal only). Serves the 45 named BQ queries from
+    # tools.yaml to the analytics FastAPI service via toolbox-core client.
     containers {
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics:latest"
+      name  = "toolbox"
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics-toolbox:latest"
+      env {
+        name  = "PROJECT_ID"
+        value = var.project_id
+      }
+      resources {
+        limits = { cpu = "0.5", memory = "256Mi" }
+      }
+      startup_probe {
+        http_get {
+          path = "/api/toolset"
+          port = 5000
+        }
+        initial_delay_seconds = 5
+        period_seconds        = 5
+        failure_threshold     = 10
+      }
+    }
+
+    # ── Analytics FastAPI service (primary) ───────────────────────────────
+    containers {
+      name       = "analytics"
+      image      = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics:latest"
+      depends_on = ["toolbox"]
       ports { container_port = 8005 }
       env {
         name  = "GCP_PROJECT_ID"
@@ -645,8 +673,40 @@ resource "google_cloud_run_v2_service" "analytics" {
         name  = "BIGQUERY_DATASET"
         value = "chat_analytics"
       }
+      env {
+        name  = "GEMINI_API_KEY"
+        value = var.gemini_api_key
+      }
+      env {
+        name  = "TOOLBOX_URL"
+        value = "http://localhost:5000"
+      }
+      env {
+        name  = "DEVOPS_EMAIL"
+        value = var.analytics_devops_email
+      }
+      env {
+        name  = "TECH_EMAIL"
+        value = var.analytics_tech_email
+      }
+      env {
+        name  = "BUSINESS_EMAIL"
+        value = var.analytics_business_email
+      }
+      env {
+        name  = "LOOKER_STUDIO_DEVOPS_URL"
+        value = var.looker_studio_devops_url
+      }
+      env {
+        name  = "LOOKER_STUDIO_TECH_URL"
+        value = var.looker_studio_tech_url
+      }
+      env {
+        name  = "LOOKER_STUDIO_BUSINESS_URL"
+        value = var.looker_studio_business_url
+      }
       resources {
-        limits = { cpu = "1", memory = "512Mi" }
+        limits = { cpu = "2", memory = "1Gi" }
       }
     }
   }
@@ -1229,4 +1289,59 @@ resource "google_monitoring_alert_policy" "cohere_errors_alert" {
 
   notification_channels = local.notification_channels
   alert_strategy { auto_close = "3600s" }
+}
+
+# ── Analytics: Gmail Secret Manager references ────────────────────────────────
+# Secrets were created manually (gmail-sender, gmail-app-password).
+# Grant read access to the analytics service account so runtime can fetch them.
+data "google_secret_manager_secret" "gmail_sender" {
+  secret_id  = "gmail-sender"
+  depends_on = [google_project_service.apis]
+}
+
+data "google_secret_manager_secret" "gmail_app_password" {
+  secret_id  = "gmail-app-password"
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_secret_manager_secret_iam_member" "analytics_gmail_sender" {
+  secret_id = data.google_secret_manager_secret.gmail_sender.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.analytics_sa.email}"
+}
+
+resource "google_secret_manager_secret_iam_member" "analytics_gmail_password" {
+  secret_id = data.google_secret_manager_secret.gmail_app_password.secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.analytics_sa.email}"
+}
+
+# ── Analytics: Vertex AI access (for ADK / Gemini) ────────────────────────────
+resource "google_project_iam_member" "analytics_vertex" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.analytics_sa.email}"
+}
+
+# ── Cloud Scheduler for weekly analytics ─────────────────────────────────────
+resource "google_project_service" "scheduler_api" {
+  service            = "cloudscheduler.googleapis.com"
+  disable_on_destroy = false
+  depends_on         = [google_project_service.apis]
+}
+
+resource "google_cloud_scheduler_job" "weekly_analytics" {
+  name      = "weekly-analytics-report"
+  schedule  = "0 9 * * 1" # every Monday at 09:00 UTC
+  time_zone = "UTC"
+  region    = var.region
+
+  http_target {
+    http_method = "POST"
+    uri         = "${google_cloud_run_v2_service.analytics.uri}/analyze/run"
+    headers     = { "Content-Type" = "application/json" }
+    body        = base64encode(jsonencode({ audience = "all", days = 7 }))
+  }
+
+  depends_on = [google_project_service.scheduler_api, google_cloud_run_v2_service.analytics]
 }

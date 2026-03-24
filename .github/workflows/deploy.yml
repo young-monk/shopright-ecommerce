@@ -53,6 +53,11 @@ jobs:
             image: analytics
             cloud_run_name: analytics
             port: 8005
+          - service: analytics-toolbox
+            context: ai/analytics/toolbox
+            image: analytics-toolbox
+            cloud_run_name: analytics
+            port: 5000
 
     steps:
       - uses: actions/checkout@v4
@@ -88,18 +93,28 @@ jobs:
         include:
           - image: frontend
             cloud_run_name: frontend
+            container_name: ""
           - image: api-gateway
             cloud_run_name: api-gateway
+            container_name: ""
           - image: product-service
             cloud_run_name: product-service
+            container_name: ""
           - image: order-service
             cloud_run_name: order-service
+            container_name: ""
           - image: user-service
             cloud_run_name: user-service
+            container_name: ""
           - image: chatbot
             cloud_run_name: chatbot-service
+            container_name: ""
           - image: analytics
             cloud_run_name: analytics
+            container_name: analytics
+          - image: analytics-toolbox
+            cloud_run_name: analytics
+            container_name: toolbox
 
     steps:
       - id: auth
@@ -113,9 +128,14 @@ jobs:
       - name: Deploy to Cloud Run
         run: |
           IMAGE=${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/shopright/${{ matrix.image }}:${{ github.sha }}
+          CONTAINER_FLAG=""
+          if [ -n "${{ matrix.container_name }}" ]; then
+            CONTAINER_FLAG="--container ${{ matrix.container_name }}"
+          fi
           gcloud run services update ${{ matrix.cloud_run_name }} \
             --image $IMAGE \
+            $CONTAINER_FLAG \
             --region ${{ env.GCP_REGION }} \
             --project ${{ secrets.GCP_PROJECT_ID }} \
             --quiet
-          echo "Deployed ${{ matrix.cloud_run_name }}"
+          echo "Deployed ${{ matrix.cloud_run_name }}${CONTAINER_FLAG}"
