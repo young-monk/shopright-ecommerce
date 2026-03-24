@@ -739,7 +739,10 @@ resource "google_cloud_run_v2_service" "analytics_dashboard" {
   template {
     service_account = google_service_account.analytics_sa.email
     containers {
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics-dashboard:latest"
+      # Placeholder image lets Terraform create the service on first apply even
+      # before the analytics-dashboard image has been built by CI/CD.
+      # The deploy workflow (deploy.yml) updates the image on every push.
+      image = "us-docker.pkg.dev/cloudrun/container/hello:latest"
       ports { container_port = 8080 }
       env {
         name  = "GCP_PROJECT_ID"
@@ -750,6 +753,14 @@ resource "google_cloud_run_v2_service" "analytics_dashboard" {
       }
     }
   }
+
+  lifecycle {
+    # Image is managed by CI/CD (deploy.yml gcloud run services update).
+    # Ignore it here to prevent Terraform from reverting the image back to
+    # the placeholder after CI/CD has deployed the real one.
+    ignore_changes = [template[0].containers[0].image]
+  }
+
   depends_on = [google_project_service.apis]
 }
 
