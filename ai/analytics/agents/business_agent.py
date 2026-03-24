@@ -211,7 +211,7 @@ def make_business_agent(toolbox_tools: list) -> LlmAgent:
     """
     return LlmAgent(
         name="business_agent",
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         description="Business analytics agent for satisfaction scores, conversion, session outcomes, and top products.",
         instruction=_BUSINESS_INSTRUCTION,
         tools=toolbox_tools + [

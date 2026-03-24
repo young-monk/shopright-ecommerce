@@ -194,7 +194,7 @@ def make_tech_agent(toolbox_tools: list) -> LlmAgent:
     """
     return LlmAgent(
         name="tech_agent",
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         description="Technical ML analytics agent covering RAG quality, embeddings, token cost, and intent analysis.",
         instruction=_TECH_INSTRUCTION,
         tools=toolbox_tools + [

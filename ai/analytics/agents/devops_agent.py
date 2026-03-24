@@ -172,7 +172,7 @@ def make_devops_agent(toolbox_tools: list) -> LlmAgent:
     """
     return LlmAgent(
         name="devops_agent",
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         description="DevOps analytics agent for infrastructure health, error rates, latency and security events.",
         instruction=_DEVOPS_INSTRUCTION,
         tools=toolbox_tools + [

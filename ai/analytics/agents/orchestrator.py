@@ -41,12 +41,15 @@ async def init_orchestrator() -> None:
     logger.info("Connecting to MCP Toolbox at %s", TOOLBOX_URL)
     toolbox = ToolboxClient(TOOLBOX_URL)
 
-    devops_tools   = await toolbox.aload_toolset("devops")
-    tech_tools     = await toolbox.aload_toolset("tech")
-    business_tools = await toolbox.aload_toolset("business")
-
-    logger.info("Loaded %d devops / %d tech / %d business tools",
-                len(devops_tools), len(tech_tools), len(business_tools))
+    try:
+        devops_tools   = await toolbox.load_toolset("devops")
+        tech_tools     = await toolbox.load_toolset("tech")
+        business_tools = await toolbox.load_toolset("business")
+        logger.info("Loaded %d devops / %d tech / %d business tools",
+                    len(devops_tools), len(tech_tools), len(business_tools))
+    except Exception as exc:
+        logger.warning("MCP Toolbox unavailable (%s) — running without ad-hoc BQ tools", exc)
+        devops_tools = tech_tools = business_tools = []
 
     devops_agent   = make_devops_agent(devops_tools)
     tech_agent     = make_tech_agent(tech_tools)
@@ -54,7 +57,7 @@ async def init_orchestrator() -> None:
 
     root_agent = LlmAgent(
         name="analytics_orchestrator",
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         description="ShopRight Analytics Orchestrator — routes requests to DevOps, Tech, or Business agents.",
         instruction="""You are the ShopRight Analytics Orchestrator.
 

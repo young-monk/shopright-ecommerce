@@ -98,6 +98,16 @@ services:
     environment:
       - GCP_PROJECT_ID=${GCP_PROJECT_ID:-}
       - BIGQUERY_DATASET=chat_analytics
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GOOGLE_API_KEY=${GEMINI_API_KEY:-}
+      - GMAIL_SENDER=${GMAIL_SENDER:-hallyalasridhar@gmail.com}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD:-zxcagpwirfemcibj}
+      - DEVOPS_EMAIL=${DEVOPS_EMAIL:-hallyalasridhar@gmail.com}
+      - TECH_EMAIL=${TECH_EMAIL:-hallyalasridhar@gmail.com}
+      - BUSINESS_EMAIL=${BUSINESS_EMAIL:-hallyalasridhar@gmail.com}
+      - GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json
+    volumes:
+      - ~/.config/gcloud/application_default_credentials.json:/gcp/adc.json:ro
 
 volumes:
   postgres_data:
