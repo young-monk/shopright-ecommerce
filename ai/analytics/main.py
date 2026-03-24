@@ -239,7 +239,7 @@ async def get_model_metrics(days: int = 14):
       ROUND(SUM(COALESCE(estimated_cost_usd, 0)), 6) AS cost_usd,
       CAST(AVG(COALESCE(ttft_ms, 0)) AS INT64) AS avg_ttft_ms,
       CAST(AVG(COALESCE(llm_ms, 0)) AS INT64) AS avg_llm_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered = TRUE) * 100.0, COUNT(*)), 2) AS unanswered_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered = TRUE OR scope_rejected = TRUE) * 100.0, COUNT(*)), 2) AS unanswered_rate_pct,
       ROUND(AVG(COALESCE(rag_confidence, 0)), 4) AS avg_rag_confidence,
       CAST(AVG(COALESCE(tokens_in, 0)) AS INT64) AS avg_tokens_in,
       CAST(AVG(COALESCE(tokens_out, 0)) AS INT64) AS avg_tokens_out
@@ -254,9 +254,9 @@ async def get_model_metrics(days: int = 14):
       ROUND(AVG(COALESCE(estimated_cost_usd, 0)) * 1000, 4) AS cost_per_1k_requests_usd,
       CAST(APPROX_QUANTILES(ttft_ms, 100)[OFFSET(95)] AS INT64) AS p95_ttft_ms,
       CAST(AVG(COALESCE(ttft_ms, 0)) AS INT64) AS avg_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered = TRUE) * 100.0, COUNT(*)), 2) AS unanswered_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered = TRUE OR scope_rejected = TRUE) * 100.0, COUNT(*)), 2) AS unanswered_rate_pct,
       ROUND(AVG(COALESCE(rag_confidence, 0)), 4) AS avg_rag_confidence,
-      ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag = TRUE) * 100.0, COUNT(*)), 2) AS hallucination_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag = TRUE) * 100.0, COUNT(*)), 2) AS citation_gap_rate_pct,
       CAST(AVG(COALESCE(tokens_in, 0)) AS INT64) AS avg_tokens_in,
       CAST(AVG(COALESCE(tokens_out, 0)) AS INT64) AS avg_tokens_out
     FROM {_table(BQ_TABLE)}
