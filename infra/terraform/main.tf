@@ -717,7 +717,7 @@ resource "google_cloud_run_v2_service" "analytics" {
         value = "https://analytics-dashboard-${data.google_project.project.number}.${var.region}.run.app"
       }
       resources {
-        limits = { cpu = "2", memory = "1Gi" }
+        limits = { cpu = "1", memory = "1Gi" }
       }
     }
   }
