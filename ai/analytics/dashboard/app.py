@@ -228,21 +228,26 @@ def devops_page(days: int) -> None:
 
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
-        st.metric("Total Requests", f"{int(_scalar(s, 'total_requests')):,}")
+        st.metric("Total Requests", f"{int(_scalar(s, 'total_requests')):,}",
+                  help="Total chat messages sent by users in the selected period.")
     with c2:
-        st.metric("Sessions", f"{int(_scalar(s, 'total_sessions')):,}")
+        st.metric("Sessions", f"{int(_scalar(s, 'total_sessions')):,}",
+                  help="Unique chat sessions (conversations) started in the period.")
     with c3:
         val = _scalar(s, "error_rate_pct")
         icon = "🔴" if val > 2 else "🟡" if val > 0.5 else "🟢"
-        st.metric("Error Rate", f"{icon} {val:.2f}%")
+        st.metric("Error Rate", f"{icon} {val:.2f}%",
+                  help="% of requests where the LLM returned an error. 🟢 ≤ 0.5% · 🟡 ≤ 2% · 🔴 > 2%")
     with c4:
         val = int(_scalar(s, "p95_latency_ms"))
         icon = "🔴" if val > 8000 else "🟡" if val > 4000 else "🟢"
-        st.metric("p95 Latency", f"{icon} {val:,} ms")
+        st.metric("p95 Latency", f"{icon} {val:,} ms",
+                  help="95th-percentile end-to-end response time. 🟢 < 4 s · 🟡 < 8 s · 🔴 ≥ 8 s")
     with c5:
         val = _scalar(s, "unanswered_rate_pct")
         icon = "🔴" if val > 25 else "🟡" if val > 10 else "🟢"
-        st.metric("Unanswered Rate", f"{icon} {val:.1f}%")
+        st.metric("Unanswered Rate", f"{icon} {val:.1f}%",
+                  help="% of messages the bot couldn't answer — includes truly unanswered AND out-of-scope rejections. 🟢 ≤ 10% · 🟡 ≤ 25% · 🔴 > 25%")
 
     if not daily.empty:
         st.subheader("Daily Request Volume & Error Rate")
@@ -278,10 +283,12 @@ def devops_page(days: int) -> None:
     c1, c2 = st.columns(2)
     with c1:
         val = int(_scalar(s, "vulgar_blocks"))
-        st.metric("Vulgar Content Blocks", val)
+        st.metric("Vulgar Content Blocks", val,
+                  help="Messages blocked because they contained profanity or abusive language. Any non-zero value should be reviewed.")
     with c2:
         val = int(_scalar(s, "injection_blocks"))
-        st.metric("Prompt Injection Blocks", val)
+        st.metric("Prompt Injection Blocks", val,
+                  help="Messages blocked because they attempted to override the bot's instructions (e.g. 'ignore all previous instructions'). Any non-zero value should be reviewed.")
 
 
 def tech_page(days: int) -> None:
@@ -307,13 +314,16 @@ def tech_page(days: int) -> None:
     with c2:
         val = _scalar(s, "frustration_rate_pct")
         icon = "🔴" if val > 15 else "🟡" if val > 8 else "🟢"
-        st.metric("Frustration Rate", f"{icon} {val:.1f}%")
+        st.metric("Frustration Rate", f"{icon} {val:.1f}%",
+                  help="% of messages where the user showed frustration signals (repeated rephrasing, negative sentiment). 🟢 ≤ 8% · 🟡 ≤ 15% · 🔴 > 15%")
     with c3:
         val = _scalar(s, "rec_gap_rate_pct")
         icon = "🔴" if val > 10 else "🟡" if val > 5 else "🟢"
-        st.metric("Rec Gap Rate", f"{icon} {val:.1f}%")
+        st.metric("Rec Gap Rate", f"{icon} {val:.1f}%",
+                  help="% of messages where the bot had no matching products to recommend — a proxy for catalog coverage gaps. 🟢 ≤ 5% · 🟡 ≤ 10% · 🔴 > 10%")
     with c4:
-        st.metric("Total LLM Cost", f"${_scalar(s, 'total_cost_usd'):.4f}")
+        st.metric("Total LLM Cost", f"${_scalar(s, 'total_cost_usd'):.4f}",
+                  help="Estimated Gemini API cost for the selected period, based on tokens in/out at published rates.")
     with c5:
         val = _scalar(s, "citation_gap_rate_pct")
         icon = "🔴" if val > 5 else "🟢"
@@ -380,21 +390,23 @@ def business_page(days: int) -> None:
     with c1:
         val = _scalar(sat, "avg_stars")
         icon = "🔴" if val < 3.0 else "🟡" if val < 4.0 else "🟢"
-        st.metric("Avg Star Rating", f"{icon} {val:.1f} ★")
+        st.metric("Avg Star Rating", f"{icon} {val:.1f} ★",
+                  help="Average star rating left by users at the end of a session (1–5 stars). 🟢 ≥ 4.0 · 🟡 ≥ 3.0 · 🔴 < 3.0")
     with c2:
         val = _scalar(sat, "positive_rate_pct")
         icon = "🔴" if val < 50 else "🟡" if val < 70 else "🟢"
-        st.metric("Positive Reviews (≥4★)", f"{icon} {val:.1f}%")
+        st.metric("Positive Reviews (≥4★)", f"{icon} {val:.1f}%",
+                  help="% of session reviews with 4 or 5 stars. 🟢 ≥ 70% · 🟡 ≥ 50% · 🔴 < 50%")
     with c3:
         val = _scalar(feedback, "thumbs_up_rate_pct")
         icon = "🔴" if val < 60 else "🟡" if val < 75 else "🟢"
         st.metric("Thumbs-Up Rate", f"{icon} {val:.1f}%",
-                  help="Per-message 👍 rate — separate from star ratings.")
+                  help="% of individual bot responses that received a 👍 reaction. Measures per-message quality, not overall session satisfaction — distinct from star ratings. 🟢 ≥ 75% · 🟡 ≥ 60% · 🔴 < 60%")
     with c4:
         conv_avg = conversion["conversion_rate_pct"].mean() if not conversion.empty else 0
         icon = "🔴" if conv_avg < 10 else "🟢"
         st.metric("Avg Chip Conversion", f"{icon} {conv_avg:.1f}%",
-                  help="% of sessions where user clicked a product chip.")
+                  help="% of sessions where the user clicked at least one product chip (add-to-cart intent signal). Calculated as sessions-with-clicks ÷ total-sessions. 🟢 ≥ 10% · 🔴 < 10%")
 
     if not sat_daily.empty:
         st.subheader("Star Rating Over Time")
