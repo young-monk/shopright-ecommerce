@@ -713,16 +713,8 @@ resource "google_cloud_run_v2_service" "analytics" {
         value = var.analytics_business_email
       }
       env {
-        name  = "LOOKER_STUDIO_DEVOPS_URL"
-        value = var.looker_studio_devops_url
-      }
-      env {
-        name  = "LOOKER_STUDIO_TECH_URL"
-        value = var.looker_studio_tech_url
-      }
-      env {
-        name  = "LOOKER_STUDIO_BUSINESS_URL"
-        value = var.looker_studio_business_url
+        name  = "DASHBOARD_URL"
+        value = "https://analytics-dashboard-${data.google_project.project.number}.${var.region}.run.app"
       }
       resources {
         limits = { cpu = "2", memory = "1Gi" }
@@ -734,6 +726,35 @@ resource "google_cloud_run_v2_service" "analytics" {
 
 resource "google_cloud_run_service_iam_member" "analytics_public" {
   service  = google_cloud_run_v2_service.analytics.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "allUsers"
+}
+
+# ── Cloud Run: Analytics Dashboard (Streamlit) ────────────────────────────────
+resource "google_cloud_run_v2_service" "analytics_dashboard" {
+  name     = "analytics-dashboard"
+  location = var.region
+
+  template {
+    service_account = google_service_account.analytics_sa.email
+    containers {
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics-dashboard:latest"
+      ports { container_port = 8080 }
+      env {
+        name  = "GCP_PROJECT_ID"
+        value = var.project_id
+      }
+      resources {
+        limits = { cpu = "1", memory = "512Mi" }
+      }
+    }
+  }
+  depends_on = [google_project_service.apis]
+}
+
+resource "google_cloud_run_service_iam_member" "dashboard_public" {
+  service  = google_cloud_run_v2_service.analytics_dashboard.name
   location = var.region
   role     = "roles/run.invoker"
   member   = "allUsers"

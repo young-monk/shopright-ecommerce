@@ -58,6 +58,11 @@ jobs:
             image: analytics-toolbox
             cloud_run_name: analytics-toolbox
             port: 5000
+          - service: analytics-dashboard
+            context: ai/analytics/dashboard
+            image: analytics-dashboard
+            cloud_run_name: analytics-dashboard
+            port: 8080
 
     steps:
       - uses: actions/checkout@v4
@@ -114,6 +119,9 @@ jobs:
             container_name: ""
           - image: analytics-toolbox
             cloud_run_name: analytics-toolbox
+            container_name: ""
+          - image: analytics-dashboard
+            cloud_run_name: analytics-dashboard
             container_name: ""
 
     steps:

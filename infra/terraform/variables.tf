@@ -77,20 +77,3 @@ variable "analytics_business_email" {
   default     = "hallyalasridhar@gmail.com"
 }
 
-variable "looker_studio_devops_url" {
-  description = "Looker Studio dashboard URL for DevOps audience (optional)"
-  type        = string
-  default     = ""
-}
-
-variable "looker_studio_tech_url" {
-  description = "Looker Studio dashboard URL for Technical audience (optional)"
-  type        = string
-  default     = ""
-}
-
-variable "looker_studio_business_url" {
-  description = "Looker Studio dashboard URL for Business audience (optional)"
-  type        = string
-  default     = ""
-}
