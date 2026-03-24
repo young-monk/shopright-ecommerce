@@ -695,7 +695,10 @@ resource "google_cloud_run_v2_service" "analytics" {
       }
       env {
         name  = "TOOLBOX_URL"
-        value = google_cloud_run_v2_service.toolbox.uri
+        # Cloud Run v2 URL format is deterministic at plan time — avoids the
+        # "provider produced inconsistent final plan" error that occurs when
+        # referencing google_cloud_run_v2_service.toolbox.uri (unknown until apply).
+        value = "https://analytics-toolbox-${data.google_project.project.number}.${var.region}.run.app"
       }
       env {
         name  = "DEVOPS_EMAIL"
@@ -726,7 +729,7 @@ resource "google_cloud_run_v2_service" "analytics" {
       }
     }
   }
-  depends_on = [google_project_service.apis, google_cloud_run_v2_service.toolbox]
+  depends_on = [google_project_service.apis]
 }
 
 resource "google_cloud_run_service_iam_member" "analytics_public" {
