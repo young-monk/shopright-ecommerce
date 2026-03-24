@@ -54,8 +54,8 @@ def _devops_summary(days: int) -> pd.DataFrame:
       CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(50)] AS INT64)               AS p50_latency_ms,
       CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)               AS p95_latency_ms,
       CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                   AS avg_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE OR scope_rejected=TRUE)*100.0, COUNT(*)), 2)
-                                                                                 AS unanswered_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)          AS unanswered_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(scope_rejected=TRUE)*100.0, COUNT(*)), 2)        AS scope_rejected_rate_pct,
       COUNTIF(vulgar_flag = TRUE)                                                AS vulgar_blocks,
       COUNTIF(prompt_injection_flag = TRUE)                                      AS injection_blocks
     FROM {_t("chat_logs")}
@@ -73,8 +73,8 @@ def _devops_daily(days: int) -> pd.DataFrame:
       CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(50)] AS INT64)               AS p50_latency_ms,
       CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)               AS p95_latency_ms,
       CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                   AS avg_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE OR scope_rejected=TRUE)*100.0, COUNT(*)), 2)
-                                                                                 AS unanswered_rate_pct
+      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)          AS unanswered_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(scope_rejected=TRUE)*100.0, COUNT(*)), 2)        AS scope_rejected_rate_pct
     FROM {_t("chat_logs")}
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
     GROUP BY date ORDER BY date
@@ -95,7 +95,14 @@ def _tech_summary(days: int) -> pd.DataFrame:
       ROUND(AVG(COALESCE(turn_number, 1)), 1)                                   AS avg_turn_number,
       ROUND(AVG(COALESCE(sources_count, 0)), 1)                                 AS avg_sources_count,
       ROUND(SAFE_DIVIDE(COUNTIF(query_rewritten=TRUE)*100.0, COUNT(*)), 2)     AS query_rewritten_rate_pct,
-      COUNTIF(wellbeing_triggered=TRUE)                                          AS wellbeing_triggered_count
+      COUNTIF(wellbeing_triggered=TRUE)                                          AS wellbeing_triggered_count,
+      CAST(AVG(COALESCE(tokens_in, 0)) AS INT64)                                AS avg_tokens_in,
+      CAST(AVG(COALESCE(tokens_out, 0)) AS INT64)                               AS avg_tokens_out,
+      ROUND(AVG(COALESCE(context_pct, 0)), 2)                                   AS avg_context_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(rag_empty=TRUE)*100.0, COUNT(*)), 2)           AS rag_empty_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(price_filter_used=TRUE)*100.0, COUNT(*)), 2)   AS price_filter_rate_pct,
+      CAST(AVG(COALESCE(ann_candidates_count, 0)) AS INT64)                     AS avg_ann_candidates,
+      ROUND(AVG(COALESCE(unique_brands_count, 0)), 1)                           AS avg_unique_brands
     FROM {_t("chat_logs")}
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
     """)
@@ -208,6 +215,31 @@ def _biz_top_products(days: int) -> pd.DataFrame:
     """)
 
 
+def _devops_error_types(days: int) -> pd.DataFrame:
+    return _q(f"""
+    SELECT
+      COALESCE(llm_error_type, 'unknown')                                        AS error_type,
+      COUNT(*)                                                                   AS count
+    FROM {_t("chat_logs")}
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+      AND llm_error = TRUE
+    GROUP BY error_type ORDER BY count DESC
+    """)
+
+
+def _biz_category_demand(days: int) -> pd.DataFrame:
+    return _q(f"""
+    SELECT
+      COALESCE(detected_category, 'Unknown')                                     AS category,
+      COUNT(*)                                                                   AS requests,
+      ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1)                        AS pct
+    FROM {_t("chat_logs")}
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+      AND detected_category IS NOT NULL
+    GROUP BY category ORDER BY requests DESC LIMIT 12
+    """)
+
+
 def _biz_outcomes(days: int) -> pd.DataFrame:
     return _q(f"""
     SELECT outcome, COUNT(*) AS sessions,
@@ -243,7 +275,8 @@ def devops_page(days: int) -> None:
     s = _devops_summary(days)
     daily = _devops_daily(days)
 
-    c1, c2, c3, c4, c5 = st.columns(5)
+    # ── Row 1: volume & reliability ──────────────────────────────────────────
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
         st.metric("Total Requests", f"{int(_scalar(s, 'total_requests')):,}",
                   help="Total chat messages sent by users in the selected period.")
@@ -262,9 +295,14 @@ def devops_page(days: int) -> None:
                   help="95th-percentile end-to-end response time. 🟢 < 4 s · 🟡 < 8 s · 🔴 ≥ 8 s")
     with c5:
         val = _scalar(s, "unanswered_rate_pct")
-        icon = "🔴" if val > 25 else "🟡" if val > 10 else "🟢"
+        icon = "🔴" if val > 20 else "🟡" if val > 10 else "🟢"
         st.metric("Unanswered Rate", f"{icon} {val:.1f}%",
-                  help="% of messages the bot couldn't answer — includes truly unanswered AND out-of-scope rejections. 🟢 ≤ 10% · 🟡 ≤ 25% · 🔴 > 25%")
+                  help="% of messages the bot genuinely couldn't answer (no relevant products or knowledge). Excludes out-of-scope rejections. 🟢 ≤ 10% · 🟡 ≤ 20% · 🔴 > 20%")
+    with c6:
+        val = _scalar(s, "scope_rejected_rate_pct")
+        icon = "🔴" if val > 15 else "🟡" if val > 5 else "🟢"
+        st.metric("Scope Rejected Rate", f"{icon} {val:.1f}%",
+                  help="% of messages the bot refused because they were outside its domain (e.g. asking for recipes, weather, or other non-home-improvement topics). High values may mean the scope prompt is too restrictive. 🟢 ≤ 5% · 🟡 ≤ 15% · 🔴 > 15%")
 
     if not daily.empty:
         st.subheader("Daily Request Volume & Error Rate")
@@ -296,16 +334,41 @@ def devops_page(days: int) -> None:
         fig3.update_layout(height=250, margin=dict(t=10, b=10))
         st.plotly_chart(fig3, use_container_width=True)
 
-    st.subheader("Security Events (period total)")
-    c1, c2 = st.columns(2)
-    with c1:
-        val = int(_scalar(s, "vulgar_blocks"))
-        st.metric("Vulgar Content Blocks", val,
-                  help="Messages blocked because they contained profanity or abusive language. Any non-zero value should be reviewed.")
-    with c2:
-        val = int(_scalar(s, "injection_blocks"))
-        st.metric("Prompt Injection Blocks", val,
-                  help="Messages blocked because they attempted to override the bot's instructions (e.g. 'ignore all previous instructions'). Any non-zero value should be reviewed.")
+        st.subheader("Unanswered vs Scope-Rejected Rate (%)")
+        fig4 = px.line(daily, x="date",
+                       y=["unanswered_rate_pct", "scope_rejected_rate_pct"],
+                       color_discrete_map={"unanswered_rate_pct": "#f59e0b",
+                                           "scope_rejected_rate_pct": "#8b5cf6"},
+                       labels={"value": "%", "variable": ""})
+        fig4.for_each_trace(lambda t: t.update(
+            name={"unanswered_rate_pct": "Unanswered",
+                  "scope_rejected_rate_pct": "Scope Rejected"}[t.name]
+        ))
+        fig4.update_layout(height=260, margin=dict(t=10, b=10))
+        st.plotly_chart(fig4, use_container_width=True)
+
+    col_sec, col_err = st.columns(2)
+    with col_sec:
+        st.subheader("Security Events (period total)")
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            val = int(_scalar(s, "vulgar_blocks"))
+            st.metric("Vulgar Content Blocks", val,
+                      help="Messages blocked because they contained profanity or abusive language. Any non-zero value should be reviewed.")
+        with sc2:
+            val = int(_scalar(s, "injection_blocks"))
+            st.metric("Prompt Injection Blocks", val,
+                      help="Messages blocked because they attempted to override the bot's instructions (e.g. 'ignore all previous instructions'). Any non-zero value should be reviewed.")
+    with col_err:
+        error_types = _devops_error_types(days)
+        if not error_types.empty:
+            st.subheader("Error Type Breakdown")
+            fig_err = px.bar(error_types, x="count", y="error_type", orientation="h",
+                             color_discrete_sequence=["#f87171"])
+            fig_err.update_layout(height=max(180, len(error_types) * 40),
+                                  margin=dict(t=10, b=10),
+                                  yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_err, use_container_width=True)
 
 
 def tech_page(days: int) -> None:
@@ -323,58 +386,93 @@ def tech_page(days: int) -> None:
     daily = _tech_daily(days)
     latency_bd = _tech_latency_breakdown(days)
 
-    # ── Row 1: RAG quality ────────────────────────────────────────────────────
-    c1, c2, c3, c4, c5 = st.columns(5)
+    # ── Row 1: Retrieval pipeline (search quality) ────────────────────────────
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     with c1:
         val = _scalar(s, "avg_rag_confidence")
         icon = "🔴" if val > 0.6 else "🟡" if val > 0.4 else "🟢"
         st.metric("RAG Confidence", f"{icon} {val:.3f}",
                   help="Cosine distance between query and retrieved docs — lower is better. 🟢 ≤ 0.4 · 🟡 ≤ 0.6 · 🔴 > 0.6")
     with c2:
-        val = _scalar(s, "frustration_rate_pct")
-        icon = "🔴" if val > 15 else "🟡" if val > 8 else "🟢"
-        st.metric("Frustration Rate", f"{icon} {val:.1f}%",
-                  help="% of messages where the user showed frustration signals (repeated rephrasing, negative sentiment). 🟢 ≤ 8% · 🟡 ≤ 15% · 🔴 > 15%")
+        val = _scalar(s, "rag_empty_rate_pct")
+        icon = "🔴" if val > 10 else "🟡" if val > 3 else "🟢"
+        st.metric("RAG Empty Rate", f"{icon} {val:.1f}%",
+                  help="% of queries where vector search returned zero results — harder gap than rec_gap (wrong products; this means no products at all). 🟢 ≤ 3% · 🟡 ≤ 10% · 🔴 > 10%")
     with c3:
-        val = _scalar(s, "rec_gap_rate_pct")
-        icon = "🔴" if val > 10 else "🟡" if val > 5 else "🟢"
-        st.metric("Rec Gap Rate", f"{icon} {val:.1f}%",
-                  help="% of messages where no product matched what the user asked for — proxy for catalog coverage gaps. 🟢 ≤ 5% · 🟡 ≤ 10% · 🔴 > 10%")
+        val = int(_scalar(s, "avg_ann_candidates"))
+        icon = "🔴" if val < 10 else "🟡" if val < 20 else "🟢"
+        st.metric("Avg ANN Candidates", f"{icon} {val}",
+                  help="Average number of ANN vector search candidates retrieved before reranking. Low values mean the HNSW index is returning few matches — may indicate catalog coverage or embedding quality issues. 🟢 ≥ 20 · 🟡 ≥ 10 · 🔴 < 10")
     with c4:
-        st.metric("Total LLM Cost", f"${_scalar(s, 'total_cost_usd'):.4f}",
-                  help="Estimated Gemini API cost for the period, based on tokens in/out at published rates.")
+        val = _scalar(s, "avg_sources_count")
+        icon = "🔴" if val < 2 else "🟡" if val < 4 else "🟢"
+        st.metric("Avg Sources / Query", f"{icon} {val:.1f}",
+                  help="Average number of RAG source documents passed to the LLM per query. Low values may indicate embedding quality issues. 🟢 ≥ 4 · 🟡 ≥ 2 · 🔴 < 2")
     with c5:
-        val = _scalar(s, "citation_gap_rate_pct")
-        icon = "🔴" if val > 5 else "🟢"
-        st.metric("Citation Gap Rate", f"{icon} {val:.1f}%",
-                  help="Heuristic: bot had RAG sources but product names didn't appear in its response — proxy for hallucination. 🟢 ≤ 5% · 🔴 > 5%")
+        val = _scalar(s, "avg_unique_brands")
+        icon = "🟢" if val >= 2 else "🟡"
+        st.metric("Avg Brands / Query", f"{icon} {val:.1f}",
+                  help="Average number of distinct brands in retrieved results per query. Low diversity may mean the catalog is brand-concentrated. 🟢 ≥ 2 · 🟡 < 2")
+    with c6:
+        val = _scalar(s, "price_filter_rate_pct")
+        st.metric("Price Filter Rate", f"{val:.1f}%",
+                  help="% of queries where the bot detected a budget constraint (e.g. 'under $80', 'max $200'). High values signal price-sensitive users — ensure the catalog has enough options at various price points.")
 
-    # ── Row 2: Pipeline health ────────────────────────────────────────────────
+    # ── Row 2: Answer quality & safety ────────────────────────────────────────
     r1, r2, r3, r4, r5 = st.columns(5)
     with r1:
         val = _scalar(s, "rerank_used_pct")
         icon = "🔴" if val < 50 else "🟢"
         st.metric("Rerank Used", f"{icon} {val:.1f}%",
-                  help="% of queries where Vertex AI Ranking API successfully reranked results. Low values indicate the reranker is falling back to hybrid score. 🟢 ≥ 50% · 🔴 < 50%")
+                  help="% of queries where Vertex AI Ranking API successfully reranked results. Low values mean the reranker is falling back to hybrid score. 🟢 ≥ 50% · 🔴 < 50%")
     with r2:
-        val = _scalar(s, "avg_turn_number")
-        icon = "🟢" if val >= 3 else "🟡"
-        st.metric("Avg Turn Depth", f"{icon} {val:.1f}",
-                  help="Average turn number within a session — measures how deep conversations go. Higher = more engaged users. 🟢 ≥ 3 turns · 🟡 < 3 turns")
+        val = _scalar(s, "citation_gap_rate_pct")
+        icon = "🔴" if val > 5 else "🟢"
+        st.metric("Citation Gap Rate", f"{icon} {val:.1f}%",
+                  help="Heuristic: bot had RAG sources but product names didn't appear in its response — proxy for hallucination. 🟢 ≤ 5% · 🔴 > 5%")
     with r3:
-        val = _scalar(s, "avg_sources_count")
-        icon = "🔴" if val < 2 else "🟡" if val < 4 else "🟢"
-        st.metric("Avg Sources / Query", f"{icon} {val:.1f}",
-                  help="Average number of RAG source documents retrieved per query. Low values may indicate embedding quality issues. 🟢 ≥ 4 · 🟡 ≥ 2 · 🔴 < 2")
+        val = _scalar(s, "rec_gap_rate_pct")
+        icon = "🔴" if val > 10 else "🟡" if val > 5 else "🟢"
+        st.metric("Rec Gap Rate", f"{icon} {val:.1f}%",
+                  help="% of messages where no product matched what the user asked for — proxy for catalog coverage gaps. 🟢 ≤ 5% · 🟡 ≤ 10% · 🔴 > 10%")
     with r4:
-        val = _scalar(s, "query_rewritten_rate_pct")
-        st.metric("Query Rewrite Rate", f"{val:.1f}%",
-                  help="% of queries that were rewritten before embedding (e.g. coreference resolution, deduplication of history context). Higher = more multi-turn conversations benefiting from rewriting.")
+        val = _scalar(s, "frustration_rate_pct")
+        icon = "🔴" if val > 15 else "🟡" if val > 8 else "🟢"
+        st.metric("Frustration Rate", f"{icon} {val:.1f}%",
+                  help="% of messages where the user showed frustration signals (repeated rephrasing, negative sentiment). 🟢 ≤ 8% · 🟡 ≤ 15% · 🔴 > 15%")
     with r5:
         val = int(_scalar(s, "wellbeing_triggered_count"))
         icon = "🔴" if val > 0 else "🟢"
         st.metric("Wellbeing Triggers", f"{icon} {val}",
                   help="Count of messages that triggered a wellbeing safety response (e.g. distress signals detected). Any non-zero value should be reviewed.")
+
+    # ── Row 3: Cost & session depth ───────────────────────────────────────────
+    t1, t2, t3, t4, t5, t6 = st.columns(6)
+    with t1:
+        st.metric("Total LLM Cost", f"${_scalar(s, 'total_cost_usd'):.4f}",
+                  help="Estimated Gemini API cost for the period, based on tokens in/out at published rates.")
+    with t2:
+        val = int(_scalar(s, "avg_tokens_in"))
+        st.metric("Avg Tokens In", f"{val:,}",
+                  help="Average input token count per message (user message + history + RAG context). Grows with conversation depth. Watch for spikes approaching the 1M context limit.")
+    with t3:
+        val = int(_scalar(s, "avg_tokens_out"))
+        st.metric("Avg Tokens Out", f"{val:,}",
+                  help="Average output token count per message. Higher values = longer bot responses. Directly drives LLM cost.")
+    with t4:
+        val = _scalar(s, "avg_context_pct")
+        icon = "🔴" if val > 50 else "🟡" if val > 20 else "🟢"
+        st.metric("Avg Context Used", f"{icon} {val:.1f}%",
+                  help="Average % of Gemini's 1M-token context window consumed per request. 🟢 < 20% · 🟡 < 50% · 🔴 ≥ 50% — high values risk context truncation in long sessions.")
+    with t5:
+        val = _scalar(s, "avg_turn_number")
+        icon = "🟢" if val >= 3 else "🟡"
+        st.metric("Avg Turn Depth", f"{icon} {val:.1f}",
+                  help="Average turn number within a session — measures conversation engagement. Higher = more engaged users. 🟢 ≥ 3 turns · 🟡 < 3 turns")
+    with t6:
+        val = _scalar(s, "query_rewritten_rate_pct")
+        st.metric("Query Rewrite Rate", f"{val:.1f}%",
+                  help="% of queries rewritten before embedding (coreference resolution, history deduplication). Higher = more multi-turn conversations benefiting from rewriting.")
 
     if not daily.empty:
         st.subheader("RAG Confidence Over Time (cosine distance — lower is better)")
@@ -518,28 +616,42 @@ def business_page(days: int) -> None:
                                yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig4, use_container_width=True)
 
-    intents = _tech_intents(days)
-    if not intents.empty:
-        _INTENT_LABELS = {
-            "product_search": "Product Search",
-            "DIY_advice": "DIY Advice",
-            "price_comparison": "Price Comparison",
-            "how_to_use": "How-To / Install",
-            "complaint": "Complaint",
-            "general_info": "General Info",
-            "availability_check": "Availability Check",
-            "troubleshooting": "Troubleshooting",
-            "general_chat": "General Chat",
-            "unknown": "Unknown",
-        }
-        intents["label"] = intents["intent"].map(lambda x: _INTENT_LABELS.get(x, x))
-        st.subheader("What Are Customers Asking About?")
-        fig5 = px.pie(intents, names="label", values="count",
-                      color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig5.update_traces(textposition="inside", textinfo="percent+label")
-        fig5.update_layout(height=360, margin=dict(t=10, b=10),
-                           showlegend=False)
-        st.plotly_chart(fig5, use_container_width=True)
+    biz_col1, biz_col2 = st.columns(2)
+    with biz_col1:
+        intents = _tech_intents(days)
+        if not intents.empty:
+            _INTENT_LABELS = {
+                "product_search": "Product Search",
+                "DIY_advice": "DIY Advice",
+                "price_comparison": "Price Comparison",
+                "how_to_use": "How-To / Install",
+                "complaint": "Complaint",
+                "general_info": "General Info",
+                "availability_check": "Availability Check",
+                "troubleshooting": "Troubleshooting",
+                "general_chat": "General Chat",
+                "unknown": "Unknown",
+            }
+            intents["label"] = intents["intent"].map(lambda x: _INTENT_LABELS.get(x, x))
+            st.subheader("What Are Customers Asking About?")
+            fig5 = px.pie(intents, names="label", values="count",
+                          color_discrete_sequence=px.colors.qualitative.Pastel)
+            fig5.update_traces(textposition="inside", textinfo="percent+label")
+            fig5.update_layout(height=360, margin=dict(t=10, b=10), showlegend=False)
+            st.plotly_chart(fig5, use_container_width=True)
+
+    with biz_col2:
+        cat_demand = _biz_category_demand(days)
+        if not cat_demand.empty:
+            st.subheader("Top Categories by Demand")
+            fig6 = px.bar(cat_demand, x="requests", y="category", orientation="h",
+                          text="pct",
+                          color_discrete_sequence=["#6366f1"])
+            fig6.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+            fig6.update_layout(height=max(280, len(cat_demand) * 30),
+                               margin=dict(t=10, b=10, r=60),
+                               yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig6, use_container_width=True)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
