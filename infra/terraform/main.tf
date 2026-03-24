@@ -610,6 +610,38 @@ resource "google_storage_bucket_iam_member" "assets_public" {
   member = "allUsers"
 }
 
+# ── Cloud Run: MCP Toolbox Service ───────────────────────────────────────────
+# Standalone service (not a sidecar) so it gets its own URL and avoids the
+# "exactly one exposed port" restriction on multi-container revisions.
+resource "google_cloud_run_v2_service" "toolbox" {
+  name     = "analytics-toolbox"
+  location = var.region
+
+  template {
+    service_account = google_service_account.analytics_sa.email
+    containers {
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics-toolbox:latest"
+      ports { container_port = 5000 }
+      env {
+        name  = "PROJECT_ID"
+        value = var.project_id
+      }
+      resources {
+        limits = { cpu = "0.5", memory = "256Mi" }
+      }
+    }
+  }
+  depends_on = [google_project_service.apis]
+}
+
+# Only the analytics SA may call the toolbox — not public
+resource "google_cloud_run_service_iam_member" "toolbox_invoker" {
+  service  = google_cloud_run_v2_service.toolbox.name
+  location = var.region
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:${google_service_account.analytics_sa.email}"
+}
+
 # ── Cloud Run: Analytics Service ──────────────────────────────────────────────
 resource "google_service_account" "analytics_sa" {
   account_id   = "shopright-analytics"
@@ -651,6 +683,14 @@ resource "google_cloud_run_v2_service" "analytics" {
         value = var.gemini_api_key
       }
       env {
+        name  = "GOOGLE_API_KEY"
+        value = var.gemini_api_key
+      }
+      env {
+        name  = "TOOLBOX_URL"
+        value = google_cloud_run_v2_service.toolbox.uri
+      }
+      env {
         name  = "DEVOPS_EMAIL"
         value = var.analytics_devops_email
       }
@@ -679,7 +719,7 @@ resource "google_cloud_run_v2_service" "analytics" {
       }
     }
   }
-  depends_on = [google_project_service.apis]
+  depends_on = [google_project_service.apis, google_cloud_run_v2_service.toolbox]
 }
 
 resource "google_cloud_run_service_iam_member" "analytics_public" {

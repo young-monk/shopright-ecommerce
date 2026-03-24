@@ -91,6 +91,16 @@ services:
     depends_on:
       - api-gateway
 
+  analytics-toolbox:
+    build: ./ai/analytics/toolbox
+    ports:
+      - "5001:5000"
+    environment:
+      - PROJECT_ID=${GCP_PROJECT_ID:-}
+      - GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json
+    volumes:
+      - ~/.config/gcloud/application_default_credentials.json:/gcp/adc.json:ro
+
   analytics:
     build: ./ai/analytics
     ports:
@@ -105,9 +115,12 @@ services:
       - DEVOPS_EMAIL=${DEVOPS_EMAIL:-hallyalasridhar@gmail.com}
       - TECH_EMAIL=${TECH_EMAIL:-hallyalasridhar@gmail.com}
       - BUSINESS_EMAIL=${BUSINESS_EMAIL:-hallyalasridhar@gmail.com}
+      - TOOLBOX_URL=http://analytics-toolbox:5000
       - GOOGLE_APPLICATION_CREDENTIALS=/gcp/adc.json
     volumes:
       - ~/.config/gcloud/application_default_credentials.json:/gcp/adc.json:ro
+    depends_on:
+      - analytics-toolbox
 
 volumes:
   postgres_data:

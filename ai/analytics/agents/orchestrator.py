@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import os
 
+import google.auth
+import google.auth.transport.requests
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -26,6 +28,22 @@ logger = logging.getLogger(__name__)
 
 TOOLBOX_URL = os.getenv("TOOLBOX_URL", "http://localhost:5000")
 
+
+def _get_id_token_header(audience: str) -> dict[str, str]:
+    """
+    Return an Authorization header with a fresh OIDC identity token.
+    Used when calling a Cloud Run service (HTTPS URL).
+    Falls back to empty dict locally where metadata server is absent.
+    """
+    try:
+        import google.oauth2.id_token
+        request = google.auth.transport.requests.Request()
+        token = google.oauth2.id_token.fetch_id_token(request, audience)
+        return {"Authorization": f"Bearer {token}"}
+    except Exception as exc:
+        logger.debug("Could not fetch OIDC token (%s) — calling toolbox unauthenticated", exc)
+        return {}
+
 # Module-level singletons — populated by init_orchestrator() at app startup.
 _runner: Runner | None = None
 _session_service: InMemorySessionService | None = None
@@ -39,7 +57,9 @@ async def init_orchestrator() -> None:
     global _runner, _session_service
 
     logger.info("Connecting to MCP Toolbox at %s", TOOLBOX_URL)
-    toolbox = ToolboxClient(TOOLBOX_URL)
+    # Cloud Run requires an OIDC identity token; localhost needs none.
+    headers = _get_id_token_header(TOOLBOX_URL) if TOOLBOX_URL.startswith("https://") else {}
+    toolbox = ToolboxClient(TOOLBOX_URL, client_headers=headers)
 
     try:
         devops_tools   = await toolbox.load_toolset("devops")

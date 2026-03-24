@@ -53,6 +53,11 @@ jobs:
             image: analytics
             cloud_run_name: analytics
             port: 8005
+          - service: analytics-toolbox
+            context: ai/analytics/toolbox
+            image: analytics-toolbox
+            cloud_run_name: analytics-toolbox
+            port: 5000
 
     steps:
       - uses: actions/checkout@v4
@@ -106,6 +111,9 @@ jobs:
             container_name: ""
           - image: analytics
             cloud_run_name: analytics
+            container_name: ""
+          - image: analytics-toolbox
+            cloud_run_name: analytics-toolbox
             container_name: ""
 
     steps:

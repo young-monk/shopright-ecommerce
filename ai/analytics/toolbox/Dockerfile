@@ -4,4 +4,4 @@
 FROM us-central1-docker.pkg.dev/database-toolbox/toolbox/toolbox:latest
 COPY tools.yaml /config/tools.yaml
 EXPOSE 5000
-ENTRYPOINT ["/toolbox/toolbox", "--tools_file", "/config/tools.yaml", "--address", "0.0.0.0"]
+ENTRYPOINT ["/toolbox", "--tools_file", "/config/tools.yaml", "--address", "0.0.0.0"]
