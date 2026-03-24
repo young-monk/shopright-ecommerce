@@ -128,6 +128,14 @@ jobs:
       - name: Deploy to Cloud Run
         run: |
           IMAGE=${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/shopright/${{ matrix.image }}:${{ github.sha }}
+          # Skip if service doesn't exist yet (Terraform creates it on first run)
+          if ! gcloud run services describe ${{ matrix.cloud_run_name }} \
+               --region ${{ env.GCP_REGION }} \
+               --project ${{ secrets.GCP_PROJECT_ID }} \
+               --quiet 2>/dev/null; then
+            echo "Service ${{ matrix.cloud_run_name }} not yet provisioned by Terraform — skipping image update"
+            exit 0
+          fi
           CONTAINER_FLAG=""
           if [ -n "${{ matrix.container_name }}" ]; then
             CONTAINER_FLAG="--container ${{ matrix.container_name }}"
