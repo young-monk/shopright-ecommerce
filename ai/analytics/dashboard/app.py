@@ -91,7 +91,11 @@ def _tech_summary(days: int) -> pd.DataFrame:
       ROUND(SAFE_DIVIDE(SUM(COALESCE(estimated_cost_usd,0)),
             COUNT(DISTINCT session_id)), 6)                                      AS cost_per_session_usd,
       ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag=TRUE)*100.0, COUNT(*)), 2)  AS citation_gap_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(rerank_used=TRUE)*100.0, COUNT(*)), 2)         AS rerank_used_pct
+      ROUND(SAFE_DIVIDE(COUNTIF(rerank_used=TRUE)*100.0, COUNT(*)), 2)         AS rerank_used_pct,
+      ROUND(AVG(COALESCE(turn_number, 1)), 1)                                   AS avg_turn_number,
+      ROUND(AVG(COALESCE(sources_count, 0)), 1)                                 AS avg_sources_count,
+      ROUND(SAFE_DIVIDE(COUNTIF(query_rewritten=TRUE)*100.0, COUNT(*)), 2)     AS query_rewritten_rate_pct,
+      COUNTIF(wellbeing_triggered=TRUE)                                          AS wellbeing_triggered_count
     FROM {_t("chat_logs")}
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
     """)
@@ -105,6 +109,19 @@ def _tech_daily(days: int) -> pd.DataFrame:
       ROUND(SAFE_DIVIDE(COUNTIF(frustration_signal=TRUE)*100.0, COUNT(*)), 2)  AS frustration_rate_pct,
       ROUND(SAFE_DIVIDE(COUNTIF(rec_gap=TRUE)*100.0, COUNT(*)), 2)             AS rec_gap_rate_pct,
       ROUND(SUM(COALESCE(estimated_cost_usd,0)), 6)                             AS cost_usd
+    FROM {_t("chat_logs")}
+    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+    GROUP BY date ORDER BY date
+    """)
+
+
+def _tech_latency_breakdown(days: int) -> pd.DataFrame:
+    return _q(f"""
+    SELECT
+      DATE(timestamp)                                                            AS date,
+      CAST(AVG(COALESCE(embed_ms, 0)) AS INT64)                                 AS avg_embed_ms,
+      CAST(AVG(COALESCE(db_ms, 0)) AS INT64)                                    AS avg_db_ms,
+      CAST(AVG(COALESCE(llm_ms, 0)) AS INT64)                                   AS avg_llm_ms
     FROM {_t("chat_logs")}
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
     GROUP BY date ORDER BY date
@@ -304,13 +321,15 @@ def tech_page(days: int) -> None:
 
     s = _tech_summary(days)
     daily = _tech_daily(days)
+    latency_bd = _tech_latency_breakdown(days)
 
+    # ── Row 1: RAG quality ────────────────────────────────────────────────────
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         val = _scalar(s, "avg_rag_confidence")
         icon = "🔴" if val > 0.6 else "🟡" if val > 0.4 else "🟢"
         st.metric("RAG Confidence", f"{icon} {val:.3f}",
-                  help="Cosine distance — lower is better. > 0.6 = poor retrieval.")
+                  help="Cosine distance between query and retrieved docs — lower is better. 🟢 ≤ 0.4 · 🟡 ≤ 0.6 · 🔴 > 0.6")
     with c2:
         val = _scalar(s, "frustration_rate_pct")
         icon = "🔴" if val > 15 else "🟡" if val > 8 else "🟢"
@@ -320,15 +339,42 @@ def tech_page(days: int) -> None:
         val = _scalar(s, "rec_gap_rate_pct")
         icon = "🔴" if val > 10 else "🟡" if val > 5 else "🟢"
         st.metric("Rec Gap Rate", f"{icon} {val:.1f}%",
-                  help="% of messages where the bot had no matching products to recommend — a proxy for catalog coverage gaps. 🟢 ≤ 5% · 🟡 ≤ 10% · 🔴 > 10%")
+                  help="% of messages where no product matched what the user asked for — proxy for catalog coverage gaps. 🟢 ≤ 5% · 🟡 ≤ 10% · 🔴 > 10%")
     with c4:
         st.metric("Total LLM Cost", f"${_scalar(s, 'total_cost_usd'):.4f}",
-                  help="Estimated Gemini API cost for the selected period, based on tokens in/out at published rates.")
+                  help="Estimated Gemini API cost for the period, based on tokens in/out at published rates.")
     with c5:
         val = _scalar(s, "citation_gap_rate_pct")
         icon = "🔴" if val > 5 else "🟢"
         st.metric("Citation Gap Rate", f"{icon} {val:.1f}%",
-                  help="Heuristic proxy — bot had sources but may not have cited products.")
+                  help="Heuristic: bot had RAG sources but product names didn't appear in its response — proxy for hallucination. 🟢 ≤ 5% · 🔴 > 5%")
+
+    # ── Row 2: Pipeline health ────────────────────────────────────────────────
+    r1, r2, r3, r4, r5 = st.columns(5)
+    with r1:
+        val = _scalar(s, "rerank_used_pct")
+        icon = "🔴" if val < 50 else "🟢"
+        st.metric("Rerank Used", f"{icon} {val:.1f}%",
+                  help="% of queries where Vertex AI Ranking API successfully reranked results. Low values indicate the reranker is falling back to hybrid score. 🟢 ≥ 50% · 🔴 < 50%")
+    with r2:
+        val = _scalar(s, "avg_turn_number")
+        icon = "🟢" if val >= 3 else "🟡"
+        st.metric("Avg Turn Depth", f"{icon} {val:.1f}",
+                  help="Average turn number within a session — measures how deep conversations go. Higher = more engaged users. 🟢 ≥ 3 turns · 🟡 < 3 turns")
+    with r3:
+        val = _scalar(s, "avg_sources_count")
+        icon = "🔴" if val < 2 else "🟡" if val < 4 else "🟢"
+        st.metric("Avg Sources / Query", f"{icon} {val:.1f}",
+                  help="Average number of RAG source documents retrieved per query. Low values may indicate embedding quality issues. 🟢 ≥ 4 · 🟡 ≥ 2 · 🔴 < 2")
+    with r4:
+        val = _scalar(s, "query_rewritten_rate_pct")
+        st.metric("Query Rewrite Rate", f"{val:.1f}%",
+                  help="% of queries that were rewritten before embedding (e.g. coreference resolution, deduplication of history context). Higher = more multi-turn conversations benefiting from rewriting.")
+    with r5:
+        val = int(_scalar(s, "wellbeing_triggered_count"))
+        icon = "🔴" if val > 0 else "🟢"
+        st.metric("Wellbeing Triggers", f"{icon} {val}",
+                  help="Count of messages that triggered a wellbeing safety response (e.g. distress signals detected). Any non-zero value should be reviewed.")
 
     if not daily.empty:
         st.subheader("RAG Confidence Over Time (cosine distance — lower is better)")
@@ -354,6 +400,24 @@ def tech_page(days: int) -> None:
         fig3 = px.bar(daily, x="date", y="cost_usd", color_discrete_sequence=["#a78bfa"])
         fig3.update_layout(height=240, margin=dict(t=10, b=10))
         st.plotly_chart(fig3, use_container_width=True)
+
+    if not latency_bd.empty:
+        st.subheader("Latency Breakdown by Component (avg ms per day)")
+        fig_lb = px.area(
+            latency_bd, x="date",
+            y=["avg_embed_ms", "avg_db_ms", "avg_llm_ms"],
+            color_discrete_map={
+                "avg_embed_ms": "#60a5fa",
+                "avg_db_ms":    "#34d399",
+                "avg_llm_ms":   "#f59e0b",
+            },
+            labels={"value": "ms", "variable": "Component"},
+        )
+        fig_lb.for_each_trace(lambda t: t.update(
+            name={"avg_embed_ms": "Embed", "avg_db_ms": "Vector DB", "avg_llm_ms": "LLM"}[t.name]
+        ))
+        fig_lb.update_layout(height=280, margin=dict(t=10, b=10))
+        st.plotly_chart(fig_lb, use_container_width=True)
 
     intents = _tech_intents(days)
     if not intents.empty:
@@ -385,8 +449,9 @@ def business_page(days: int) -> None:
     feedback = _biz_feedback(days)
     sat_daily = _biz_sat_daily(days)
     conversion = _biz_conversion(days)
+    tech = _tech_summary(days)
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         val = _scalar(sat, "avg_stars")
         icon = "🔴" if val < 3.0 else "🟡" if val < 4.0 else "🟢"
@@ -407,6 +472,11 @@ def business_page(days: int) -> None:
         icon = "🔴" if conv_avg < 10 else "🟢"
         st.metric("Avg Chip Conversion", f"{icon} {conv_avg:.1f}%",
                   help="% of sessions where the user clicked at least one product chip (add-to-cart intent signal). Calculated as sessions-with-clicks ÷ total-sessions. 🟢 ≥ 10% · 🔴 < 10%")
+    with c5:
+        val = _scalar(tech, "cost_per_session_usd")
+        icon = "🔴" if val > 0.01 else "🟡" if val > 0.005 else "🟢"
+        st.metric("Cost / Session", f"{icon} ${val:.5f}",
+                  help="Average Gemini API cost per unique session. Calculated as total token cost ÷ total sessions. 🟢 < $0.005 · 🟡 < $0.01 · 🔴 ≥ $0.01")
 
     if not sat_daily.empty:
         st.subheader("Star Rating Over Time")
@@ -447,6 +517,29 @@ def business_page(days: int) -> None:
             fig4.update_layout(height=300, margin=dict(t=10, b=10),
                                yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig4, use_container_width=True)
+
+    intents = _tech_intents(days)
+    if not intents.empty:
+        _INTENT_LABELS = {
+            "product_search": "Product Search",
+            "DIY_advice": "DIY Advice",
+            "price_comparison": "Price Comparison",
+            "how_to_use": "How-To / Install",
+            "complaint": "Complaint",
+            "general_info": "General Info",
+            "availability_check": "Availability Check",
+            "troubleshooting": "Troubleshooting",
+            "general_chat": "General Chat",
+            "unknown": "Unknown",
+        }
+        intents["label"] = intents["intent"].map(lambda x: _INTENT_LABELS.get(x, x))
+        st.subheader("What Are Customers Asking About?")
+        fig5 = px.pie(intents, names="label", values="count",
+                      color_discrete_sequence=px.colors.qualitative.Pastel)
+        fig5.update_traces(textposition="inside", textinfo="percent+label")
+        fig5.update_layout(height=360, margin=dict(t=10, b=10),
+                           showlegend=False)
+        st.plotly_chart(fig5, use_container_width=True)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────

@@ -52,7 +52,7 @@ BQ_DATASET     = os.getenv("BIGQUERY_DATASET", "chat_analytics")
 BQ_TABLE       = os.getenv("BIGQUERY_TABLE", "chat_logs")
 BQ_FEEDBACK_TABLE = os.getenv("BIGQUERY_FEEDBACK_TABLE", "feedback")
 BQ_EVENTS_TABLE   = os.getenv("BIGQUERY_EVENTS_TABLE", "chat_events")
-COHERE_API_KEY    = os.getenv("COHERE_API_KEY", "")
+GCP_REGION        = os.getenv("GCP_REGION", "us-central1")
 
 # Gemini client for lightweight async classification calls (intent, target extraction)
 _genai_client = None
@@ -77,15 +77,34 @@ if GCP_PROJECT:
 trace.set_tracer_provider(_tracer_provider)
 _tracer = trace.get_tracer("shopright.chatbot")
 
-# Cohere rerank client (optional — graceful fallback if key not set)
-_co = None
-if COHERE_API_KEY:
-    try:
-        import cohere as _cohere_lib
-        _co = _cohere_lib.ClientV2(api_key=COHERE_API_KEY)
-        logger.info("Cohere rerank enabled (rerank-v3.5)")
-    except ImportError:
-        logger.warning("cohere package not installed — rerank disabled")
+# Vertex AI Ranking API client (lazy init — uses ADC / Workload Identity)
+_rank_client = None
+
+def _get_rank_client():
+    global _rank_client
+    if _rank_client is None:
+        from google.cloud import discoveryengine_v1 as de
+        _rank_client = de.RankServiceClient()
+    return _rank_client
+
+def _rerank_sync(query: str, rows: list, top_n: int) -> list:
+    """Call Vertex AI Ranking API synchronously. Returns rows in ranked order."""
+    from google.cloud import discoveryengine_v1 as de
+    ranking_config = (
+        f"projects/{GCP_PROJECT}/locations/global"
+        f"/rankingConfigs/default_ranking_config"
+    )
+    records = [
+        de.RankingRecord(id=str(i), content=r["content"][:512])
+        for i, r in enumerate(rows)
+    ]
+    resp = _get_rank_client().rank(de.RankRequest(
+        ranking_config=ranking_config,
+        query=query,
+        records=records,
+        top_n=top_n,
+    ))
+    return [rows[int(r.id)] for r in resp.records]
 
 # ── asyncpg connection pool ───────────────────────────────────────────────────
 # Created at startup; reused across requests to avoid per-request TCP handshake
@@ -339,7 +358,7 @@ def extract_price_limit(query: str) -> float | None:
 
 # ── RAG: knowledge_embeddings hybrid search ───────────────────────────────────
 async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, dict]:
-    """Search knowledge_embeddings with hybrid ANN + optional Cohere rerank."""
+    """Search knowledge_embeddings with hybrid ANN + Vertex AI Ranking API rerank."""
     with _tracer.start_as_current_span("embed_query") as span:
         span.set_attribute("query_length", len(query))
         vector, embed_ms = await gemini_embed(query, task_type="RETRIEVAL_QUERY")
@@ -415,25 +434,19 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             rag_meta.update({"rag_confidence": None, "rag_empty": True})
             return "", [], rag_meta
 
-        # ── Rerank ────────────────────────────────────────────────────────────
+        # ── Rerank via Vertex AI Ranking API ──────────────────────────────────
         rerank_used = False
-        if _co and rows:
-            with _tracer.start_as_current_span("cohere_rerank") as span:
+        if GCP_PROJECT and rows:
+            with _tracer.start_as_current_span("vertex_rerank") as span:
                 top_n = min(16, len(rows))
                 span.set_attribute("candidates_in", len(rows))
                 span.set_attribute("top_n", top_n)
                 try:
-                    rr = _co.rerank(
-                        query=query,
-                        documents=[r["content"] for r in rows],
-                        top_n=top_n,
-                        model="rerank-v3.5",
-                    )
-                    reranked_rows = [rows[hit.index] for hit in rr.results]
+                    reranked_rows = await asyncio.to_thread(_rerank_sync, query, rows, top_n)
                     rerank_used = True
                     span.set_attribute("rerank_used", True)
                 except Exception as e:
-                    logger.warning(f"Cohere rerank failed, falling back to hybrid score: {e}")
+                    logger.warning(f"Vertex AI rerank failed, falling back to hybrid score: {e}")
                     reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
                     span.set_attribute("rerank_used", False)
                     span.set_attribute("error", str(e))
@@ -487,7 +500,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
     except Exception as e:
         logger.warning(f"RAG retrieval failed: {e}")
         return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False,
-                        "price_filter_value": None, "detected_category": None}
+                        "price_filter_value": None, "detected_category": None, "rerank_used": False}
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are ShopRight's expert AI assistant for a home improvement store. You are knowledgeable, precise, and safety-conscious.
