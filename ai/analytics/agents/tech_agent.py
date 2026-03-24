@@ -113,7 +113,7 @@ Key thresholds to flag:
   0.4–0.6: moderate
   < 0.4: good (do NOT flag low values as a problem)
 - Min vector distance trending UP week-over-week: embedding drift — consider re-embedding
-- Rerank used pct < 80%: Cohere rerank may be failing — check API key/quota
+- Rerank used pct < 80%: Vertex AI Ranking API may be failing — check Cloud Run logs for rerank errors
 - Cost per session > $0.01: high — check context window usage or token budget
 - Frustration rate > 15%: critical UX signal
 - Citation gap rate (hallucination_flag) > 5%: bot not citing retrieved products — heuristic proxy, not true hallucination detection

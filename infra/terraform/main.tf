@@ -314,10 +314,6 @@ resource "google_cloud_run_v2_service" "chatbot" {
         name  = "GEMINI_API_KEY"
         value = var.gemini_api_key
       }
-      env {
-        name  = "COHERE_API_KEY"
-        value = var.cohere_api_key
-      }
       resources {
         limits = { cpu = "2", memory = "2Gi" }
         # Extra CPU during container startup — speeds up Python import time
@@ -1273,10 +1269,10 @@ resource "google_logging_metric" "rate_limit_hits" {
   }
 }
 
-resource "google_logging_metric" "cohere_errors" {
-  name        = "chatbot/cohere_errors"
-  description = "Cohere rerank failures (key expiry / quota)"
-  filter      = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"chatbot-service\" AND textPayload=~\"Cohere rerank failed\""
+resource "google_logging_metric" "rerank_errors" {
+  name        = "chatbot/rerank_errors"
+  description = "Vertex AI Ranking API rerank failures (fallback to hybrid score)"
+  filter      = "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"chatbot-service\" AND textPayload=~\"Vertex AI rerank failed\""
   depends_on  = [google_project_service.apis]
 
   metric_descriptor {
@@ -1334,16 +1330,16 @@ resource "google_monitoring_alert_policy" "rate_limit_flood" {
   alert_strategy { auto_close = "1800s" }
 }
 
-# ── Alert: Cohere key expiry / quota ─────────────────────────────────────────
-resource "google_monitoring_alert_policy" "cohere_errors_alert" {
-  display_name = "Cohere Rerank Errors"
+# ── Alert: Vertex AI rerank failures ─────────────────────────────────────────
+resource "google_monitoring_alert_policy" "rerank_errors_alert" {
+  display_name = "Vertex AI Rerank Errors"
   combiner     = "OR"
-  depends_on   = [google_logging_metric.cohere_errors]
+  depends_on   = [google_logging_metric.rerank_errors]
 
   conditions {
-    display_name = "Cohere errors > 3 in 5 min"
+    display_name = "Rerank errors > 3 in 5 min"
     condition_threshold {
-      filter          = "resource.type=\"cloud_run_revision\" AND metric.type=\"logging.googleapis.com/user/chatbot/cohere_errors\""
+      filter          = "resource.type=\"cloud_run_revision\" AND metric.type=\"logging.googleapis.com/user/chatbot/rerank_errors\""
       duration        = "0s"
       comparison      = "COMPARISON_GT"
       threshold_value = 3

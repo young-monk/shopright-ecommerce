@@ -834,8 +834,8 @@ async def health_deep():
         checks["database"] = f"error: {str(e)[:120]}"
         overall = "degraded"
 
-    checks["gemini_key"]     = "configured" if GEMINI_API_KEY else "missing"
-    checks["cohere_rerank"]  = "enabled" if _co else "disabled"
+    checks["gemini_key"]      = "configured" if GEMINI_API_KEY else "missing"
+    checks["vertex_rerank"]   = "enabled" if GCP_PROJECT else "disabled (no GCP_PROJECT_ID)"
     if not GEMINI_API_KEY:
         overall = "degraded"
 

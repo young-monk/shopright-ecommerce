@@ -52,12 +52,6 @@ variable "alert_email" {
   default     = ""
 }
 
-variable "cohere_api_key" {
-  description = "Cohere API key for rerank-v3.5"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
 
 variable "analytics_devops_email" {
   description = "Recipient email for weekly DevOps analytics report"

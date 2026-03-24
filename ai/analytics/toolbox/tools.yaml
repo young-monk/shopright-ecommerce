@@ -538,7 +538,7 @@ tools:
     source: chat-analytics
     description: >
       Comparison of RAG confidence when rerank was used vs not used.
-      Use to measure the value of Cohere reranking.
+      Use to measure the value of Vertex AI reranking.
     parameters:
       - name: days
         type: integer

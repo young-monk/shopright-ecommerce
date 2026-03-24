@@ -38,7 +38,7 @@ _THRESHOLDS = {
   0.4–0.6: moderate retrieval quality
   < 0.4: good retrieval (do NOT flag low values as bad)
 - Min vector distance trending UP over time: embedding drift — recommend re-embedding
-- Rerank used pct < 80%: Cohere rerank may be down — check API key/quota
+- Rerank used pct < 80%: Vertex AI Ranking API may be failing — check Cloud Run logs for rerank errors
 - Cost per session > $0.01: high — check context window usage
 - Frustration rate > 15%: critical | > 8%: elevated
 - Citation gap rate (hallucination_flag) > 5%: response may not cite retrieved products — investigate; note this is a heuristic proxy, not a true hallucination detector
