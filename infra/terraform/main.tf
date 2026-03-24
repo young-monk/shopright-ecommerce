@@ -610,6 +610,13 @@ resource "google_storage_bucket_iam_member" "assets_public" {
   member = "allUsers"
 }
 
+# Import the toolbox service if it was already created outside Terraform
+# (e.g. by a partial apply). Safe to leave in place once adopted.
+import {
+  to = google_cloud_run_v2_service.toolbox
+  id = "projects/project-4e7965a7-ae62-4cc9-b93/locations/us-central1/services/analytics-toolbox"
+}
+
 # ── Cloud Run: MCP Toolbox Service ───────────────────────────────────────────
 # Standalone service (not a sidecar) so it gets its own URL and avoids the
 # "exactly one exposed port" restriction on multi-container revisions.
