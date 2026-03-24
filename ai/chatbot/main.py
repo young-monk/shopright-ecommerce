@@ -87,6 +87,12 @@ if COHERE_API_KEY:
     except ImportError:
         logger.warning("cohere package not installed — rerank disabled")
 
+# ── asyncpg connection pool ───────────────────────────────────────────────────
+# Created at startup; reused across requests to avoid per-request TCP handshake
+# overhead (~80ms) to Cloud SQL. Pool size 5 keeps Cloud SQL connections low
+# while handling concurrent requests without queuing.
+_db_pool: asyncpg.Pool | None = None
+
 GEMINI_CONTEXT_LIMIT = 1_000_000
 
 # Gemini-2.5-flash pricing (per 1M tokens)
@@ -351,7 +357,7 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
     keywords = [w for w in query.lower().split() if len(w) >= 4 and w not in stop_words]
 
     try:
-        conn = await asyncpg.connect(DATABASE_URL)
+        conn = await (_db_pool.acquire() if _db_pool else asyncpg.connect(DATABASE_URL))
 
         # Build optional filter clauses
         # Price filter: metadata->>'price' is text in JSONB; cast to numeric
@@ -390,7 +396,10 @@ async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, 
             span.set_attribute("candidates_returned", len(rows))
             span.set_attribute("db_ms", db_ms)
 
-        await conn.close()
+        if _db_pool:
+            await _db_pool.release(conn)
+        else:
+            await conn.close()
 
         ann_candidates_count = len(rows) if rows else 0
         rag_meta = {
@@ -581,8 +590,14 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup():
+    global _db_pool
     preload_embed()
     logger.info(f"[startup] Embed model: {embed_model_name()}")
+    try:
+        _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
+        logger.info("[startup] asyncpg connection pool created (min=2, max=5)")
+    except Exception as e:
+        logger.warning(f"[startup] DB pool creation failed — will fall back to per-request connect: {e}")
 
 # ── Pydantic models ────────────────────────────────────────────────────────────
 class ChatMessage(BaseModel):
@@ -1038,6 +1053,7 @@ async def chat_stream(request: ChatRequest):
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """Non-streaming fallback endpoint."""
+    t0 = time.monotonic()
     session_id = request.session_id or str(uuid.uuid4())
     message_id = str(uuid.uuid4())
     history = request.history or []
@@ -1089,7 +1105,7 @@ async def chat(request: ChatRequest):
     mentioned = [s for s in raw_sources if s["name"].lower() in full_response.lower()]
     final_sources = mentioned  # only show chips for products the bot actually named
     is_unanswered = detect_unanswered(full_response, len(final_sources), history)
-    latency_ms = 0  # not tracked for non-streaming
+    latency_ms = int((time.monotonic() - t0) * 1000)
 
     asyncio.create_task(log_to_bigquery(
         session_id, message_id, request.message, full_response, final_sources, latency_ms, is_unanswered,

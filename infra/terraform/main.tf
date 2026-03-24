@@ -273,6 +273,14 @@ resource "google_cloud_run_v2_service" "chatbot" {
 
   template {
     service_account = google_service_account.chatbot_sa.email
+
+    # Keep one instance always warm — eliminates cold-start latency (12-15s)
+    # for real users. Max 10 instances under burst load.
+    scaling {
+      min_instance_count = 1
+      max_instance_count = 10
+    }
+
     vpc_access {
       connector = google_vpc_access_connector.connector.id
       egress    = "PRIVATE_RANGES_ONLY"
@@ -312,6 +320,8 @@ resource "google_cloud_run_v2_service" "chatbot" {
       }
       resources {
         limits = { cpu = "2", memory = "2Gi" }
+        # Extra CPU during container startup — speeds up Python import time
+        cpu_idle = false
       }
       volume_mounts {
         name       = "cloudsql"
