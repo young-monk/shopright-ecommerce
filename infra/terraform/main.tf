@@ -635,26 +635,8 @@ resource "google_cloud_run_v2_service" "analytics" {
   template {
     service_account = google_service_account.analytics_sa.email
 
-    # ── MCP Toolbox sidecar ────────────────────────────────────────────────
-    # Runs on port 5000 (internal only). Serves the 45 named BQ queries from
-    # tools.yaml to the analytics FastAPI service via toolbox-core client.
     containers {
-      name  = "toolbox"
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics-toolbox:latest"
-      env {
-        name  = "PROJECT_ID"
-        value = var.project_id
-      }
-      resources {
-        limits = { cpu = "0.5", memory = "256Mi" }
-      }
-    }
-
-    # ── Analytics FastAPI service (primary) ───────────────────────────────
-    containers {
-      name       = "analytics"
-      image      = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics:latest"
-      depends_on = ["toolbox"]
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/shopright/analytics:latest"
       ports { container_port = 8005 }
       env {
         name  = "GCP_PROJECT_ID"
@@ -667,10 +649,6 @@ resource "google_cloud_run_v2_service" "analytics" {
       env {
         name  = "GEMINI_API_KEY"
         value = var.gemini_api_key
-      }
-      env {
-        name  = "TOOLBOX_URL"
-        value = "http://localhost:5000"
       }
       env {
         name  = "DEVOPS_EMAIL"
