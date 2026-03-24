@@ -5,6 +5,10 @@ terraform {
       source  = "hashicorp/google"
       version = "~> 5.0"
     }
+    time = {
+      source  = "hashicorp/time"
+      version = "~> 0.9"
+    }
   }
   backend "gcs" {
     bucket = "shopright-tf-state"
@@ -1330,11 +1334,18 @@ resource "google_monitoring_alert_policy" "rate_limit_flood" {
   alert_strategy { auto_close = "1800s" }
 }
 
+# Wait for GCP to propagate the rerank_errors log-based metric before creating the alert policy.
+# GCP monitoring can take up to 60s to make a newly created metric available for alert policies.
+resource "time_sleep" "rerank_metric_propagation" {
+  depends_on      = [google_logging_metric.rerank_errors]
+  create_duration = "60s"
+}
+
 # ── Alert: Vertex AI rerank failures ─────────────────────────────────────────
 resource "google_monitoring_alert_policy" "rerank_errors_alert" {
   display_name = "Vertex AI Rerank Errors"
   combiner     = "OR"
-  depends_on   = [google_logging_metric.rerank_errors]
+  depends_on   = [time_sleep.rerank_metric_propagation]
 
   conditions {
     display_name = "Rerank errors > 3 in 5 min"
