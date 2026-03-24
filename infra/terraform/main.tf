@@ -694,7 +694,7 @@ resource "google_cloud_run_v2_service" "analytics" {
         value = var.gemini_api_key
       }
       env {
-        name  = "TOOLBOX_URL"
+        name = "TOOLBOX_URL"
         # Cloud Run v2 URL format is deterministic at plan time — avoids the
         # "provider produced inconsistent final plan" error that occurs when
         # referencing google_cloud_run_v2_service.toolbox.uri (unknown until apply).
