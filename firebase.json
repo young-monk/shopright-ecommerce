@@ -1,0 +1,40 @@
+{
+  "hosting": [
+    {
+      "site": "shopright-store",
+      "public": "firebase-public",
+      "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+      "headers": [
+        {
+          "source": "**",
+          "headers": [
+            { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+          ]
+        }
+      ],
+      "rewrites": [
+        {
+          "source": "**",
+          "run": {
+            "serviceId": "frontend",
+            "region": "us-central1"
+          }
+        }
+      ]
+    },
+    {
+      "site": "shopright-dash",
+      "public": "firebase-public",
+      "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+      "rewrites": [
+        {
+          "source": "**",
+          "run": {
+            "serviceId": "analytics-dashboard",
+            "region": "us-central1"
+          }
+        }
+      ]
+    }
+  ]
+}

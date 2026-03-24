@@ -40,6 +40,8 @@ resource "google_project_service" "apis" {
     "monitoring.googleapis.com",
     "logging.googleapis.com",
     "cloudtrace.googleapis.com",
+    "firebase.googleapis.com",
+    "firebasehosting.googleapis.com",
   ])
   service            = each.key
   disable_on_destroy = false
@@ -852,6 +854,13 @@ resource "google_project_iam_member" "github_actions_scheduler" {
   project = var.project_id
   role    = "roles/cloudscheduler.admin"
   member  = "serviceAccount:shopright-github-actions@${var.project_id}.iam.gserviceaccount.com"
+}
+
+resource "google_project_iam_member" "github_actions_firebase_hosting" {
+  project    = var.project_id
+  role       = "roles/firebasehosting.admin"
+  member     = "serviceAccount:shopright-github-actions@${var.project_id}.iam.gserviceaccount.com"
+  depends_on = [google_project_service.apis]
 }
 
 # ── Monitoring & Alerting ──────────────────────────────────────────────────────

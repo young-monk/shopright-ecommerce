@@ -155,3 +155,29 @@ jobs:
             $CONTAINER_FLAG \
             --image $IMAGE
           echo "Deployed ${{ matrix.cloud_run_name }}${CONTAINER_FLAG}"
+
+  firebase-hosting:
+    name: Deploy Firebase Hosting
+    runs-on: ubuntu-latest
+    needs: deploy
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SERVICE_ACCOUNT }}
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy to Firebase Hosting
+        run: |
+          firebase deploy --only hosting \
+            --project ${{ secrets.GCP_PROJECT_ID }} \
+            --non-interactive
