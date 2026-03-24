@@ -33,18 +33,24 @@ _THRESHOLDS = {
 - Avg TTFT > 3000ms: elevated (cold starts or quota pressure)
 - Any prompt injection or vulgar blocks: flag and explain the risk""",
     "tech": """Key thresholds:
-- RAG confidence < 0.5: poor retrieval | < 0.7: moderate | ≥ 0.7: good
-- Min vector distance trending up: embedding drift — recommend re-embedding
+- RAG confidence is COSINE DISTANCE (lower = better match, higher = worse):
+  > 0.6: poor retrieval — check embedding model or catalog quality
+  0.4–0.6: moderate retrieval quality
+  < 0.4: good retrieval (do NOT flag low values as bad)
+- Min vector distance trending UP over time: embedding drift — recommend re-embedding
+- Rerank used pct < 80%: Cohere rerank may be down — check API key/quota
 - Cost per session > $0.01: high — check context window usage
 - Frustration rate > 15%: critical | > 8%: elevated
-- Hallucination rate > 5%: model quality issue requiring immediate attention
+- Citation gap rate (hallucination_flag) > 5%: response may not cite retrieved products — investigate; note this is a heuristic proxy, not a true hallucination detector
 - Rec gap rate > 10%: significant catalog coverage problem""",
     "business": """Key thresholds:
 - Avg star rating < 3.0: critical | < 4.0: needs improvement
 - Session failure rate > 30%: immediate attention needed
-- Positive review rate < 50%: business risk
-- Thumbs-up rate < 60%: response quality concern
-- Chip-click conversion declining 2+ weeks: recommend product catalog review""",
+- Positive review rate (stars ≥ 4) < 50%: business risk
+- Thumbs-up rate (thumbs_up_rate_pct, per-message 👍 clicks) < 60%: response quality concern — note this is a SEPARATE metric from star ratings
+- Chip-click conversion_rate_pct (sessions that clicked a product chip / total sessions) < 10%: low product engagement — review catalog relevance
+- Chip-click conversion_rate_pct declining for 2+ weeks: recommend product catalog review
+- Unanswered rate includes both truly unanswered AND out-of-scope rejections""",
 }
 
 

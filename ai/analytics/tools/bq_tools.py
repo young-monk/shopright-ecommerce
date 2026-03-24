@@ -41,7 +41,8 @@ def get_devops_metrics(days: int = 7) -> dict[str, Any]:
       CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)               AS p95_latency_ms,
       CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                   AS avg_ttft_ms,
       CAST(APPROX_QUANTILES(COALESCE(ttft_ms,0),100)[OFFSET(95)] AS INT64)     AS p95_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)        AS unanswered_rate_pct,
+      -- unanswered = truly unanswered OR scope-rejected (both mean the user got no useful answer)
+      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE OR scope_rejected=TRUE)*100.0, COUNT(*)), 2) AS unanswered_rate_pct,
       COUNTIF(vulgar_flag = TRUE)                                                AS vulgar_blocks,
       COUNTIF(prompt_injection_flag = TRUE)                                      AS injection_blocks
     FROM {_t("chat_logs")}
@@ -60,7 +61,7 @@ def get_devops_metrics(days: int = 7) -> dict[str, Any]:
       CAST(AVG(latency_ms) AS INT64)                                             AS avg_latency_ms,
       CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                   AS avg_ttft_ms,
       CAST(APPROX_QUANTILES(COALESCE(ttft_ms,0),100)[OFFSET(95)] AS INT64)     AS p95_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)        AS unanswered_rate_pct,
+      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE OR scope_rejected=TRUE)*100.0, COUNT(*)), 2) AS unanswered_rate_pct,
       COUNTIF(vulgar_flag = TRUE)                                                AS total_vulgar_blocks,
       COUNTIF(prompt_injection_flag = TRUE)                                      AS total_injection_blocks
     FROM {_t("chat_logs")}
@@ -112,7 +113,8 @@ def get_tech_metrics(days: int = 7) -> dict[str, Any]:
       ROUND(SAFE_DIVIDE(COUNTIF(frustration_signal=TRUE)*100.0, COUNT(*)), 2)  AS frustration_rate_pct,
       ROUND(SAFE_DIVIDE(COUNTIF(rerank_used=TRUE)*100.0, COUNT(*)), 2)         AS rerank_used_pct,
       ROUND(SAFE_DIVIDE(COUNTIF(rec_gap=TRUE)*100.0, COUNT(*)), 2)             AS rec_gap_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag=TRUE)*100.0, COUNT(*)), 2)  AS hallucination_rate_pct
+      -- citation_gap_rate: bot had sources but didn't cite product names — heuristic proxy for hallucination
+      ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag=TRUE)*100.0, COUNT(*)), 2)  AS citation_gap_rate_pct
     FROM {_t("chat_logs")}
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
     """
@@ -181,16 +183,30 @@ def get_business_metrics(days: int = 30) -> dict[str, Any]:
     FROM {_t("session_reviews")}
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
     """
+    # Chip-click conversion rate = sessions_with_clicks / total_sessions_that_day
     conversion_sql = f"""
     SELECT
-      DATE(timestamp)                       AS date,
-      COUNT(*)                               AS chip_clicks,
-      COUNT(DISTINCT session_id)             AS sessions_with_clicks
-    FROM {_t("chat_events")}
-    WHERE event_type = 'chip_click'
-      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date
-    ORDER BY date
+      e.date,
+      e.chip_clicks,
+      e.sessions_with_clicks,
+      t.total_sessions,
+      ROUND(SAFE_DIVIDE(e.sessions_with_clicks * 100.0, t.total_sessions), 2) AS conversion_rate_pct
+    FROM (
+      SELECT DATE(timestamp) AS date,
+             COUNT(*) AS chip_clicks,
+             COUNT(DISTINCT session_id) AS sessions_with_clicks
+      FROM {_t("chat_events")}
+      WHERE event_type = 'chip_click'
+        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+      GROUP BY date
+    ) e
+    LEFT JOIN (
+      SELECT DATE(timestamp) AS date, COUNT(DISTINCT session_id) AS total_sessions
+      FROM {_t("chat_logs")}
+      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
+      GROUP BY date
+    ) t ON e.date = t.date
+    ORDER BY e.date
     """
     top_products_sql = f"""
     SELECT
@@ -219,7 +235,8 @@ def get_business_metrics(days: int = 30) -> dict[str, Any]:
       COUNTIF(rating=1)  AS thumbs_up,
       COUNTIF(rating=-1) AS thumbs_down,
       COUNT(*)            AS total_feedback,
-      ROUND(SAFE_DIVIDE(COUNTIF(rating=1)*100.0, COUNT(*)), 2) AS positive_rate_pct
+      -- renamed from positive_rate_pct to avoid confusion with star-rating positive_rate_pct
+      ROUND(SAFE_DIVIDE(COUNTIF(rating=1)*100.0, COUNT(*)), 2) AS thumbs_up_rate_pct
     FROM {_t("feedback")}
     WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
     """

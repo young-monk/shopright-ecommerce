@@ -111,8 +111,10 @@ Present numbers in plain business language — avoid technical jargon.
 Key thresholds to flag:
 - Avg star rating < 3.0: critical customer satisfaction issue
 - Session failure rate > 30%: immediate attention needed
-- Positive review rate < 50%: business risk
-- Chip-click conversion trending down for 2+ weeks: recommend product catalog review
+- Positive review rate (stars ≥ 4 sessions) < 50%: business risk
+- Thumbs-up rate (thumbs_up_rate_pct) < 60%: per-message response quality concern — distinct from star ratings
+- Chip-click conversion_rate_pct (% of sessions where user clicked a product) < 10%: low product engagement
+- Chip-click conversion_rate_pct declining for 2+ weeks: recommend product catalog review
 """
 
 
