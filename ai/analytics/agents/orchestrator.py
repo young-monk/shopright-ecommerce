@@ -57,7 +57,7 @@ async def init_orchestrator() -> None:
 
     root_agent = LlmAgent(
         name="analytics_orchestrator",
-        model="gemini-2.5-flash",
+        model="gemini-3.1-pro-preview",
         description="ShopRight Analytics Orchestrator — routes requests to DevOps, Tech, or Business agents.",
         instruction="""You are the ShopRight Analytics Orchestrator.
 
