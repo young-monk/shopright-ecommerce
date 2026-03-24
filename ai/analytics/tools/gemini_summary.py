@@ -1,4 +1,4 @@
-"""Generate a concise written summary of analytics metrics using Gemini."""
+"""Generate an in-depth written analysis of analytics metrics using Gemini."""
 from __future__ import annotations
 
 import json
@@ -9,68 +9,94 @@ logger = logging.getLogger(__name__)
 
 _AUDIENCE_CONTEXT = {
     "devops": (
-        "You are summarising a DevOps / SRE infrastructure report for engineers. "
-        "Audience cares about error rates, latency, unanswered queries, and security events."
+        "You are a senior SRE writing an infrastructure health analysis for engineers and on-call staff. "
+        "The audience understands technical terms like p95 latency, error rate, TTFT, and prompt injection. "
+        "Focus on what needs attention, what looks healthy, and what trends warrant investigation."
     ),
     "tech": (
-        "You are summarising a Technical / ML analytics report for ML engineers and data scientists. "
-        "Audience cares about RAG confidence, embedding quality, LLM cost, frustration rate, "
-        "and hallucination rate."
+        "You are an ML engineer writing a technical performance analysis for ML engineers and data scientists. "
+        "The audience cares deeply about RAG confidence, embedding quality, vector distance, token cost, "
+        "frustration rate, hallucination rate, and catalog gaps. Be precise about thresholds and what they imply."
     ),
     "business": (
-        "You are summarising a Business analytics report for product managers and executives. "
-        "Audience cares about customer satisfaction scores, session outcomes, top products, "
-        "and conversion trends. Use plain, non-technical language."
+        "You are a product analyst writing a business performance summary for product managers and executives. "
+        "Use plain language — no jargon. Focus on customer satisfaction, conversion trends, session outcomes, "
+        "and what these numbers mean for the product. Highlight risks and bright spots."
     ),
+}
+
+_THRESHOLDS = {
+    "devops": """Key thresholds:
+- Error rate > 2%: critical | > 0.5%: elevated | ≤ 0.5%: healthy
+- p95 latency > 8000ms: slow | > 4000ms: moderate
+- Unanswered rate > 25%: high (catalog gaps likely) | > 10%: moderate
+- Avg TTFT > 3000ms: elevated (cold starts or quota pressure)
+- Any prompt injection or vulgar blocks: flag and explain the risk""",
+    "tech": """Key thresholds:
+- RAG confidence < 0.5: poor retrieval | < 0.7: moderate | ≥ 0.7: good
+- Min vector distance trending up: embedding drift — recommend re-embedding
+- Cost per session > $0.01: high — check context window usage
+- Frustration rate > 15%: critical | > 8%: elevated
+- Hallucination rate > 5%: model quality issue requiring immediate attention
+- Rec gap rate > 10%: significant catalog coverage problem""",
+    "business": """Key thresholds:
+- Avg star rating < 3.0: critical | < 4.0: needs improvement
+- Session failure rate > 30%: immediate attention needed
+- Positive review rate < 50%: business risk
+- Thumbs-up rate < 60%: response quality concern
+- Chip-click conversion declining 2+ weeks: recommend product catalog review""",
 }
 
 
 def gemini_narrative(metrics: dict, audience: str, days: int) -> str:
     """
-    Call Gemini to produce a short HTML <ul> narrative for the given metrics dict.
+    Call Gemini to produce an in-depth HTML analysis of the given metrics.
 
-    Args:
-        metrics: Summary/KPI dict from get_*_metrics().
-        audience: One of "devops", "tech", "business".
-        days: Time window for context.
-
-    Returns:
-        HTML string: <h2>Analysis</h2><ul>…</ul>
-        Falls back to empty string on any error.
+    Returns HTML with Executive Summary, Key Findings, Trends, and Actions.
+    Falls back to a plain metric list on any error.
     """
     try:
-        from google import genai  # type: ignore  # google-genai package
-        from google.genai import types as genai_types
+        from google import genai
 
         api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
         client = genai.Client(api_key=api_key) if api_key else genai.Client()
 
         ctx = _AUDIENCE_CONTEXT.get(audience, "")
+        thresholds = _THRESHOLDS.get(audience, "")
         prompt = (
             f"{ctx}\n\n"
-            f"Here are the key metrics for the last {days} days (JSON):\n"
+            f"{thresholds}\n\n"
+            f"Metrics for the last {days} days (JSON):\n"
             f"{json.dumps(metrics, default=str, indent=2)}\n\n"
-            "Write 4-6 bullet points of plain-English analysis. Each bullet should either: "
-            "flag something that needs attention with a threshold reason, "
-            "or confirm something is healthy. Be specific — include the actual numbers. "
-            "Return ONLY the bullet points as HTML <li> elements (no wrapping <ul> tag). "
-            "Use <strong> for status labels like '✓ Healthy', '⚠ Critical', '↑ Elevated'."
+            "Write a thorough analysis in HTML with these four sections:\n"
+            "1. <h2>Executive Summary</h2> — 2-3 sentences on overall health.\n"
+            "2. <h2>Key Findings</h2> — 4-8 <li> bullets. Each must include the actual number, "
+            "compare it to the threshold, and state the action needed. "
+            "Use <strong style='color:#dc2626'>⚠ Critical:</strong>, "
+            "<strong style='color:#d97706'>↑ Elevated:</strong>, or "
+            "<strong style='color:#16a34a'>✓ Healthy:</strong> as the label.\n"
+            "3. <h2>Trends &amp; Patterns</h2> — 2-4 sentences on what the daily data shows over time.\n"
+            "4. <h2>Recommended Actions</h2> — numbered list of concrete next steps only for items "
+            "that need attention. Omit this section entirely if everything is healthy.\n\n"
+            "Return ONLY the HTML (no <html>/<body> tags). Use inline styles for colours. "
+            "Be specific — always cite the actual numbers."
         )
 
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.1-pro-preview",
             contents=prompt,
         )
-        bullets = response.text.strip()
-        # Ensure bullets are wrapped correctly
-        if not bullets.startswith("<li"):
-            bullets = f"<li>{bullets}</li>"
-        return (
-            '<h2>Analysis</h2>'
-            '<ul style="padding-left:18px;line-height:1.8;font-size:13px;color:#374151">'
-            f'{bullets}'
-            '</ul>'
-        )
+        return response.text.strip()
+
     except Exception as exc:
-        logger.warning("gemini_narrative failed (%s) — skipping summary block", exc)
-        return ""
+        logger.warning("gemini_narrative failed (%s) — using metric fallback", exc)
+        lines = [
+            f"<li><strong>{k}:</strong> {v}</li>"
+            for k, v in metrics.items()
+            if not isinstance(v, (list, dict))
+        ]
+        return (
+            "<h2>Metrics</h2>"
+            f"<ul style='font-size:13px;line-height:1.8'>{''.join(lines)}</ul>"
+            f"<p style='color:#94a3b8;font-size:12px'>AI analysis unavailable: {exc}</p>"
+        )

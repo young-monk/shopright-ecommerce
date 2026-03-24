@@ -14,9 +14,9 @@ from datetime import datetime
 
 def _b64(fig: plt.Figure) -> str:
     buf = io.BytesIO()
-    # dpi=72 + smaller figsize keeps each chart ~10-12KB base64 so a full
-    # email with 6 charts stays well under Gmail's 102KB display limit.
-    fig.savefig(buf, format="png", dpi=72, bbox_inches="tight")
+    # dpi=55 keeps each chart ~5-7KB base64. A DevOps report with 6 charts
+    # totals ~45KB incl. HTML, comfortably under Gmail's 102KB clip limit.
+    fig.savefig(buf, format="png", dpi=55, bbox_inches="tight")
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode()
 

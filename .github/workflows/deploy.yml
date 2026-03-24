@@ -133,9 +133,9 @@ jobs:
             CONTAINER_FLAG="--container ${{ matrix.container_name }}"
           fi
           gcloud run services update ${{ matrix.cloud_run_name }} \
-            --image $IMAGE \
-            $CONTAINER_FLAG \
             --region ${{ env.GCP_REGION }} \
             --project ${{ secrets.GCP_PROJECT_ID }} \
-            --quiet
+            --quiet \
+            $CONTAINER_FLAG \
+            --image $IMAGE
           echo "Deployed ${{ matrix.cloud_run_name }}${CONTAINER_FLAG}"

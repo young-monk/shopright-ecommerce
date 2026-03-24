@@ -648,15 +648,6 @@ resource "google_cloud_run_v2_service" "analytics" {
       resources {
         limits = { cpu = "0.5", memory = "256Mi" }
       }
-      startup_probe {
-        http_get {
-          path = "/api/toolset"
-          port = 5000
-        }
-        initial_delay_seconds = 5
-        period_seconds        = 5
-        failure_threshold     = 10
-      }
     }
 
     # ── Analytics FastAPI service (primary) ───────────────────────────────
