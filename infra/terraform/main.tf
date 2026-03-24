@@ -756,6 +756,12 @@ resource "google_project_iam_member" "github_actions_logging" {
   member  = "serviceAccount:shopright-github-actions@${var.project_id}.iam.gserviceaccount.com"
 }
 
+resource "google_project_iam_member" "github_actions_scheduler" {
+  project = var.project_id
+  role    = "roles/cloudscheduler.admin"
+  member  = "serviceAccount:shopright-github-actions@${var.project_id}.iam.gserviceaccount.com"
+}
+
 # ── Monitoring & Alerting ──────────────────────────────────────────────────────
 
 # Email notification channel (only created when alert_email is provided)
@@ -1312,5 +1318,9 @@ resource "google_cloud_scheduler_job" "weekly_analytics" {
     body        = base64encode(jsonencode({ audience = "all", days = 7 }))
   }
 
-  depends_on = [google_project_service.scheduler_api, google_cloud_run_v2_service.analytics]
+  depends_on = [
+    google_project_service.scheduler_api,
+    google_cloud_run_v2_service.analytics,
+    google_project_iam_member.github_actions_scheduler,
+  ]
 }
