@@ -26,7 +26,6 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from google.adk.agents import LlmAgent
-from google.adk.events import Event, EventActions
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
@@ -186,7 +185,7 @@ async def startup():
 
 
 async def _ensure_session(session_id: str, history: list[ChatMessage]) -> None:
-    """Create an ADK session if it doesn't exist. Seeds history into context on pod restart."""
+    """Create an ADK session if it doesn't exist."""
     existing = await _session_service.get_session(
         app_name="shopright", user_id="anon", session_id=session_id
     )
@@ -194,21 +193,6 @@ async def _ensure_session(session_id: str, history: list[ChatMessage]) -> None:
         await _session_service.create_session(
             app_name="shopright", user_id="anon", session_id=session_id
         )
-        # Replay recent history so ADK has conversation context after pod restart
-        if history:
-            for msg in history[-6:]:
-                role = "user" if msg.role == "user" else "model"
-                seed_content = Content(role=role, parts=[Part(text=msg.content)])
-                await _session_service.append_event(
-                    session=await _session_service.get_session(
-                        app_name="shopright", user_id="anon", session_id=session_id
-                    ),
-                    event=Event(
-                        author="user" if role == "user" else _agent.name,
-                        content=seed_content,
-                        actions=EventActions(),
-                    ),
-                )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────

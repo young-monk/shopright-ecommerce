@@ -33,7 +33,7 @@ async def classify_intent(message: str) -> str:
         return "unknown"
     try:
         resp = await _genai_client.aio.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.0-flash",
             contents=_INTENT_PROMPT + message[:500],
         )
         label = resp.text.strip().lower().split()[0].rstrip(".,")
@@ -48,7 +48,7 @@ async def extract_intent_target(message: str) -> str:
         return ""
     try:
         resp = await _genai_client.aio.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model="gemini-2.0-flash",
             contents=_TARGET_PROMPT + message[:500],
         )
         return resp.text.strip()[:100]
