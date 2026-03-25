@@ -6,26 +6,24 @@ ShopRight AI Chatbot Service
 - SSE streaming via Runner.run_async()
 - BigQuery logging for analytics
 """
+from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from typing import Optional, List
-import os
-import uuid
+import asyncio
 import json
 import logging
 import time
-import re
-import contextvars
-import asyncio
+import uuid
 from collections import defaultdict
 from datetime import datetime, timezone
 
-import httpx
-from google.cloud import bigquery
 import asyncpg
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from opentelemetry import trace
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
 from google.adk.agents import LlmAgent
 from google.adk.events import Event, EventActions
@@ -33,35 +31,29 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai.types import Content, Part
 
-from embed import embed as gemini_embed, preload as preload_embed, model_name as embed_model_name
-
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from config import (
+    GEMINI_API_KEY, GCP_PROJECT, LLM_MODEL, DATABASE_URL,
+    BQ_DATASET, BQ_EVENTS_TABLE, GEMINI_CONTEXT_LIMIT,
+    COST_PER_1M_IN, COST_PER_1M_OUT,
+)
+from detection import (
+    is_session_ending, is_wellbeing_message, detect_unanswered,
+    detect_scope_rejected, detect_vulgar, detect_prompt_injection,
+    SESSION_END_RESPONSE, WELLBEING_RESPONSE,
+    _INJECTION_RESPONSE, _VULGAR_RESPONSE,
+)
+from embed import preload as preload_embed, model_name as embed_model_name
+from logging_bq import log_to_bigquery, log_feedback_to_bigquery
+from models import (
+    ChatMessage, ChatRequest, ChatResponse, ProductSource,
+    FeedbackRequest, ReviewRequest, AnalyticsEventRequest,
+)
+from rag import search_products
+import state
+from google.cloud import bigquery
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# ── Config ────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GCP_PROJECT    = os.getenv("GCP_PROJECT_ID", "")
-LLM_MODEL      = os.getenv("LLM_MODEL", "gemini-2.5-flash")
-DATABASE_URL   = os.getenv("DATABASE_URL", "postgresql://shopright:shopright_dev@localhost:5432/shopright")
-BQ_DATASET     = os.getenv("BIGQUERY_DATASET", "chat_analytics")
-BQ_TABLE       = os.getenv("BIGQUERY_TABLE", "chat_logs")
-BQ_FEEDBACK_TABLE = os.getenv("BIGQUERY_FEEDBACK_TABLE", "feedback")
-BQ_EVENTS_TABLE   = os.getenv("BIGQUERY_EVENTS_TABLE", "chat_events")
-GCP_REGION        = os.getenv("GCP_REGION", "us-central1")
-
-# Gemini client for lightweight async classification calls (intent, target extraction)
-_genai_client = None
-if GEMINI_API_KEY:
-    try:
-        import google.genai as _genai_lib
-        _genai_client = _genai_lib.Client(api_key=GEMINI_API_KEY)
-    except Exception:
-        pass
 
 # ── OpenTelemetry / Cloud Trace ───────────────────────────────────────────────
 _tracer_provider = TracerProvider()
@@ -76,58 +68,6 @@ if GCP_PROJECT:
         logger.warning(f"Cloud Trace exporter init failed: {e}")
 trace.set_tracer_provider(_tracer_provider)
 _tracer = trace.get_tracer("shopright.chatbot")
-
-# Vertex AI Ranking API client (lazy init — uses ADC / Workload Identity)
-_rank_client = None
-
-def _get_rank_client():
-    global _rank_client
-    if _rank_client is None:
-        from google.cloud import discoveryengine_v1 as de
-        _rank_client = de.RankServiceClient()
-    return _rank_client
-
-def _rerank_sync(query: str, rows: list, top_n: int) -> list:
-    """Call Vertex AI Ranking API synchronously. Returns rows in ranked order."""
-    from google.cloud import discoveryengine_v1 as de
-    ranking_config = (
-        f"projects/{GCP_PROJECT}/locations/global"
-        f"/rankingConfigs/default_ranking_config"
-    )
-    records = [
-        de.RankingRecord(id=str(i), content=r["content"][:512])
-        for i, r in enumerate(rows)
-    ]
-    resp = _get_rank_client().rank(de.RankRequest(
-        ranking_config=ranking_config,
-        query=query,
-        records=records,
-        top_n=top_n,
-    ))
-    return [rows[int(r.id)] for r in resp.records]
-
-# ── asyncpg connection pool ───────────────────────────────────────────────────
-# Created at startup; reused across requests to avoid per-request TCP handshake
-# overhead (~80ms) to Cloud SQL. Pool size 5 keeps Cloud SQL connections low
-# while handling concurrent requests without queuing.
-_db_pool: asyncpg.Pool | None = None
-
-GEMINI_CONTEXT_LIMIT = 1_000_000
-
-# Gemini-2.5-flash pricing (per 1M tokens)
-_COST_PER_1M_IN  = 0.075
-_COST_PER_1M_OUT = 0.30
-
-# In-memory metrics ring buffer (last 1000 requests)
-_req_metrics: list[dict] = []
-
-# Pass tool results from ADK search_products back to the SSE generator.
-# ContextVar writes inside child tasks (how ADK calls tools) don't propagate back
-# to the parent task. Fix: use a module-level dict keyed by message_id; store the
-# ID in a ContextVar (reads are safe across task boundaries).
-_cv_message_id: contextvars.ContextVar[str] = contextvars.ContextVar("message_id", default="")
-_sources_store: dict[str, list] = {}
-_rag_meta_store: dict[str, dict] = {}
 
 # ── Per-session rate limiter ──────────────────────────────────────────────────
 class _RateLimiter:
@@ -154,353 +94,7 @@ class _RateLimiter:
         for k in stale:
             del self._buckets[k]
 
-_session_limiter = _RateLimiter(max_requests=30, window_seconds=600)  # 30 req / 10 min per session
-
-# ── Session ending detection ──────────────────────────────────────────────────
-SESSION_END_PHRASES = [
-    "thanks", "thank you", "that's all", "that's it", "i'm done", "im done",
-    "goodbye", "bye", "see you", "see ya", "all set", "got it", "perfect",
-    "great thanks", "no more questions", "nothing else", "that's everything",
-    "i'm good", "im good", "i'm all good", "that'll do", "no thanks",
-]
-_AMBIGUOUS_ENDINGS = {"ok", "okay", "k", "sure", "yep", "nope", "nah", "alright", "cool", "noted"}
-_BOT_WRAP_UP_SIGNALS = [
-    "anything else", "let me know", "here if you need", "feel free to ask",
-    "happy to help", "have a great day", "come back", "is there anything",
-    "can i help", "hope that helps", "if you need anything",
-]
-
-SESSION_END_RESPONSE = (
-    "You're welcome! Before you go — how would you rate your experience today? "
-    "Your feedback helps us improve. ⭐"
-)
-
-def is_session_ending(message: str, history: list) -> bool:
-    msg = message.lower().strip()
-    if len(msg.split()) > 6:
-        return False
-    if any(phrase in msg for phrase in SESSION_END_PHRASES):
-        return True
-    if msg in _AMBIGUOUS_ENDINGS and history:
-        last_bot = next((m.content.lower() for m in reversed(history) if m.role == "assistant"), "")
-        if any(signal in last_bot for signal in _BOT_WRAP_UP_SIGNALS):
-            return True
-    return False
-
-# ── Wellbeing detection ───────────────────────────────────────────────────────
-WELLBEING_PATTERNS = [
-    "feeling low", "feeling sad", "feeling depressed", "feeling lonely",
-    "i'm sad", "im sad", "i'm depressed", "im depressed",
-    "i'm lonely", "im lonely", "i'm not okay", "im not okay",
-    "not doing well", "talk to me", "need someone to talk",
-    "having a hard time", "going through a tough time",
-    "stressed", "anxious", "overwhelmed", "hopeless",
-    "want to hurt", "hurting myself", "end my life", "suicide",
-    "nobody cares", "no one cares", "feel worthless",
-]
-
-WELLBEING_RESPONSE = (
-    "I'm really sorry to hear you're feeling this way. "
-    "I'm a shopping assistant and not equipped to provide the support you deserve right now, "
-    "but please know that help is available.\n\n"
-    "If you're in crisis or need someone to talk to, please reach out to a crisis helpline — "
-    "in the US you can call or text **988** (Suicide & Crisis Lifeline), available 24/7.\n\n"
-    "Take care of yourself. When you're ready, I'm here to help with any home improvement needs. 💙"
-)
-
-def is_wellbeing_message(message: str) -> bool:
-    msg = message.lower().strip()
-    return any(pattern in msg for pattern in WELLBEING_PATTERNS)
-
-UNCERTAINTY_PHRASES = [
-    "i don't have", "i don't know", "i'm not sure", "i cannot find",
-    "not available in", "no information", "outside my knowledge",
-    "can't help with that", "unable to find", "not in our catalog",
-]
-
-def detect_unanswered(response: str, sources_count: int, history: list) -> bool:
-    response_lower = response.lower()
-    has_uncertainty = any(phrase in response_lower for phrase in UNCERTAINTY_PHRASES)
-    return sources_count == 0 and has_uncertainty
-
-_INJECTION_RESPONSE = "I'm ShopRight's home improvement assistant and I'm not able to help with that request. Is there something around the house I can help you with?"
-_VULGAR_RESPONSE    = "That's not something I'm able to help with. I'm ShopRight's home improvement assistant — is there a project or product I can help you find?"
-
-_SCOPE_REJECTION_MARKER = "i'm here to help with home improvement"
-
-def detect_scope_rejected(response: str) -> bool:
-    return _SCOPE_REJECTION_MARKER in response.lower()
-
-# ── Vulgar / sexual content detection ────────────────────────────────────────
-_VULGAR_PATTERNS: list[tuple[str, str]] = [
-    (r"\b(porn|pornography|xxx|onlyfans)\b",                        "pornography"),
-    (r"\b(naked|nude|nudity|nudes)\b",                              "nudity"),
-    (r"\b(sex|sexual|sexually|intercourse|foreplay)\b",             "sexual"),
-    (r"\b(masturbat\w+|orgasm|ejaculat\w+)\b",                      "explicit_sexual"),
-    (r"\b(erotic|erotica|fetish|bdsm|kink\w*)\b",                   "explicit_sexual"),
-    (r"\b(fuck|fucking|fucked|fucker|fucks)\b",                     "profanity"),
-    (r"\bc[u\*]nt\b",                                               "profanity"),
-    (r"\bcock\b(?!\s*(pit|roach|tail|erel|atoo))",                  "sexual"),
-    (r"\bdick\b(?!\s*(ens|inson|son))",                             "sexual"),
-    (r"\bpussy\b(?!\s*(cat|willow|foot))",                          "sexual"),
-    (r"\bash+ole\b",                                                 "profanity"),
-    (r"\bwhor[e\b]",                                                 "profanity"),
-    (r"\bslut\b",                                                    "profanity"),
-    (r"\b(have sex|sleep with|hook up) with you\b",                 "sexual_solicitation"),
-    (r"\bshow me your (body|breasts?|genitals?)\b",                 "sexual_solicitation"),
-    (r"\bsend (me )?(nudes?|naked|sexy) (pics?|photos?|pictures?)", "sexual_solicitation"),
-]
-
-def detect_vulgar(message: str) -> tuple[bool, str | None]:
-    msg_lower = message.lower()
-    for pattern, label in _VULGAR_PATTERNS:
-        if re.search(pattern, msg_lower):
-            return True, label
-    return False, None
-
-# ── Prompt injection detection ────────────────────────────────────────────────
-_INJECTION_PATTERNS: list[tuple[str, str]] = [
-    (r"ignore\s+(all\s+)?previous\s+instructions?",                 "ignore_instructions"),
-    (r"(disregard|forget)\s+(your\s+)?(previous\s+)?instructions?", "disregard_instructions"),
-    (r"you\s+are\s+now\s+(a|an|the)\s+",                           "persona_override"),
-    (r"act\s+as\s+(a|an|the)\s+(?!store|sales|product|shop)",      "act_as"),
-    (r"pretend\s+(you\s+are|to\s+be)\s+",                          "pretend_as"),
-    (r"\b(jailbreak|dan\s+mode|do\s+anything\s+now)\b",            "jailbreak"),
-    (r"reveal\s+(your\s+)?(system\s+)?(prompt|instructions?)",      "extract_prompt"),
-    (r"what\s+(are|were)\s+your\s+(system\s+)?instructions?",       "extract_prompt"),
-    (r"override\s+(your\s+)?(safety|guidelines?|instructions?)",    "safety_override"),
-]
-_INJECTION_MSG_MAX_LEN = 4000
-
-def detect_prompt_injection(message: str) -> tuple[bool, str | None]:
-    if len(message) > _INJECTION_MSG_MAX_LEN:
-        return True, "message_too_long"
-    msg_lower = message.lower()
-    for pattern, label in _INJECTION_PATTERNS:
-        if re.search(pattern, msg_lower):
-            return True, label
-    return False, None
-
-# ── Frustration detection ─────────────────────────────────────────────────────
-_FRUSTRATION_PATTERNS: list[tuple[str, str]] = [
-    (r"\b(never mind|nevermind|forget it|forget that)\b",                    "giving_up"),
-    (r"\bnot (what i|what I) (needed|wanted|asked|meant|was looking for)\b", "mismatch"),
-    (r"\bthat'?s? (not (right|helpful|correct|what i|it)|wrong)\b",         "rejection"),
-    (r"\b(useless|not helpful|unhelpful|doesn'?t help)\b",                  "unhelpful"),
-    (r"\bjust (search|look|find) (it |myself|on my own)",                   "abandoning"),
-    (r"\bno[,.]?\s+(not that|that'?s? not)\b",                              "rejection"),
-    (r"\b(wrong product|wrong item|not the right)\b",                       "mismatch"),
-]
-
-# Last user message per session — for repeated-rephrase detection
-_session_prev_message: dict[str, str] = {}
-
-def detect_frustration(message: str, session_id: str, prev_was_unanswered: bool) -> tuple[bool, str | None]:
-    msg_lower = message.lower()
-    for pattern, label in _FRUSTRATION_PATTERNS:
-        if re.search(pattern, msg_lower):
-            return True, label
-    # Repeated rephrase: Jaccard word overlap > 60% with previous turn
-    prev = _session_prev_message.get(session_id, "")
-    if prev:
-        prev_words = set(prev.lower().split())
-        curr_words = set(msg_lower.split())
-        if len(prev_words) > 2 and len(curr_words) > 2:
-            overlap = len(prev_words & curr_words) / len(prev_words | curr_words)
-            if overlap > 0.6:
-                return True, "repeated_rephrase"
-    if prev_was_unanswered:
-        return True, "after_unanswered"
-    return False, None
-
-# ── Category keywords ─────────────────────────────────────────────────────────
-CATEGORY_KEYWORDS: dict[str, list[str]] = {
-    "Power Tools":            ["drill", "saw", "grinder", "sander", "router", "jigsaw", "circular saw", "impact driver", "nail gun", "heat gun", "power tool"],
-    "Hand Tools":             ["hammer", "screwdriver", "wrench", "pliers", "chisel", "hand tool", "tape measure", "level", "utility knife"],
-    "Outdoor & Garden":       ["lawn", "mower", "garden", "grass", "trimmer", "edger", "fertilizer", "soil", "mulch", "seed", "weed", "sprinkler", "hose", "rake", "shovel", "chainsaw", "leaf blower", "pressure washer", "snow blower", "generator", "outdoor power"],
-    "Plumbing":               ["pipe", "faucet", "toilet", "sink", "drain", "valve", "fitting", "plumbing", "water heater", "garbage disposal"],
-    "Electrical":             ["wire", "cable", "outlet", "switch", "breaker", "circuit", "electrical", "conduit", "panel", "speaker wire", "in-wall wire", "audio cable"],
-    "Flooring":               ["floor", "tile", "hardwood", "laminate", "vinyl", "carpet", "grout", "underlayment"],
-    "Paint & Supplies":       ["paint", "primer", "stain", "brush", "roller", "spray", "coating", "varnish", "caulk", "sealant"],
-    "Safety & Security":      ["safety", "glove", "helmet", "goggle", "respirator", "harness", "protective", "lock", "deadbolt", "camera", "alarm"],
-    "Storage & Organization": ["shelf", "cabinet", "rack", "storage", "organizer", "bin", "drawer", "pegboard"],
-    "Heating & Cooling":      ["hvac", "air conditioner", "heater", "furnace", "duct", "vent", "thermostat", "filter", "fan", "dehumidifier"],
-    "Building Materials":     ["insulation", "soundproof", "sound dampening", "acoustic", "drywall", "home theatre", "home theater", "theatre room", "theater room", "sound barrier", "noise reduction", "framing", "lumber", "plywood", "concrete", "cement", "batt", "r-value"],
-}
-
-def detect_category(query: str) -> str | None:
-    query_lower = query.lower()
-    for category, keywords in CATEGORY_KEYWORDS.items():
-        if any(kw in query_lower for kw in keywords):
-            return category
-    return None
-
-# ── Price extraction ───────────────────────────────────────────────────────────
-_PRICE_PATTERNS = [
-    r'under\s*\$?(\d+(?:\.\d+)?)',
-    r'below\s*\$?(\d+(?:\.\d+)?)',
-    r'less\s+than\s*\$?(\d+(?:\.\d+)?)',
-    r'cheaper\s+than\s*\$?(\d+(?:\.\d+)?)',
-    r'up\s+to\s*\$?(\d+(?:\.\d+)?)',
-    r'within\s*\$?(\d+(?:\.\d+)?)',
-    r'max(?:imum)?\s*\$?(\d+(?:\.\d+)?)',
-    r'budget\s*(?:of\s*|around\s*|~\s*)?\$?(\d+(?:\.\d+)?)',
-    r'\$?(\d+(?:\.\d+)?)\s*budget',
-    r'around\s*\$(\d+(?:\.\d+)?)',
-]
-
-def extract_price_limit(query: str) -> float | None:
-    for pattern in _PRICE_PATTERNS:
-        m = re.search(pattern, query.lower())
-        if m:
-            return float(m.group(1))
-    return None
-
-# ── RAG: knowledge_embeddings hybrid search ───────────────────────────────────
-async def get_relevant_context(query: str, top_k: int = 10) -> tuple[str, list, dict]:
-    """Search knowledge_embeddings with hybrid ANN + Vertex AI Ranking API rerank."""
-    with _tracer.start_as_current_span("embed_query") as span:
-        span.set_attribute("query_length", len(query))
-        vector, embed_ms = await gemini_embed(query, task_type="RETRIEVAL_QUERY")
-        span.set_attribute("embed_ms", embed_ms or 0)
-    if not vector:
-        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False,
-                        "price_filter_value": None, "detected_category": None, "embed_ms": None, "db_ms": None}
-
-    detected_category = detect_category(query)
-    price_limit = extract_price_limit(query)
-
-    stop_words = {"what", "which", "that", "this", "with", "have", "from", "your", "best", "good",
-                  "need", "want", "some", "for", "can", "how", "does", "show", "find", "give",
-                  "tell", "about", "under", "over", "more", "less", "cheap", "cheaper", "those", "other"}
-    keywords = [w for w in query.lower().split() if len(w) >= 4 and w not in stop_words]
-
-    try:
-        conn = await (_db_pool.acquire() if _db_pool else asyncpg.connect(DATABASE_URL))
-
-        # Build optional filter clauses
-        # Price filter: metadata->>'price' is text in JSONB; cast to numeric
-        price_clause = f"AND (metadata->>'price')::numeric <= {price_limit:.2f}" if price_limit is not None else ""
-        cat_clause = f"AND metadata->>'category' ILIKE '%{detected_category}%'" if detected_category else ""
-
-        # Keyword pattern for hybrid scoring
-        keyword_bonus = "0"
-        if keywords:
-            kw_regex = "|".join(re.escape(k) for k in keywords)
-            keyword_bonus = f"CASE WHEN LOWER(content) ~ '{kw_regex}' THEN 0.15 ELSE 0 END"
-
-        # Fetch more candidates when rerank is available (50), else use top_k directly
-        ann_limit = 50 if _co else top_k
-
-        with _tracer.start_as_current_span("vector_search") as span:
-            span.set_attribute("ann_limit", ann_limit)
-            span.set_attribute("price_filter", price_limit is not None)
-            span.set_attribute("category_filter", detected_category or "")
-            t_db = time.monotonic()
-            # Query all three doc types — use halfvec cast to hit the HNSW index
-            # (pgvector's vector(3072) exceeds the 2000-dim ANN limit; halfvec lifts it to 16000)
-            rows = await conn.fetch(
-                f"""
-                SELECT doc_type, source_id, content, metadata,
-                       (embedding::halfvec(3072) <=> $1::halfvec(3072)) AS vec_dist,
-                       {keyword_bonus} AS keyword_bonus
-                FROM knowledge_embeddings
-                WHERE 1=1 {cat_clause} {price_clause}
-                ORDER BY (embedding::halfvec(3072) <=> $1::halfvec(3072)) - {keyword_bonus}
-                LIMIT $2
-                """,
-                str(vector), ann_limit,
-            )
-            db_ms = int((time.monotonic() - t_db) * 1000)
-            span.set_attribute("candidates_returned", len(rows))
-            span.set_attribute("db_ms", db_ms)
-
-        if _db_pool:
-            await _db_pool.release(conn)
-        else:
-            await conn.close()
-
-        ann_candidates_count = len(rows) if rows else 0
-        rag_meta = {
-            "price_filter_used": price_limit is not None,
-            "price_filter_value": price_limit,
-            "detected_category": detected_category,
-            "embed_ms": embed_ms,
-            "db_ms": db_ms,
-            "ann_candidates_count": ann_candidates_count,
-        }
-
-        if not rows:
-            rag_meta.update({"rag_confidence": None, "rag_empty": True})
-            return "", [], rag_meta
-
-        # ── Rerank via Vertex AI Ranking API ──────────────────────────────────
-        rerank_used = False
-        if GCP_PROJECT and rows:
-            with _tracer.start_as_current_span("vertex_rerank") as span:
-                top_n = min(16, len(rows))
-                span.set_attribute("candidates_in", len(rows))
-                span.set_attribute("top_n", top_n)
-                try:
-                    reranked_rows = await asyncio.to_thread(_rerank_sync, query, rows, top_n)
-                    rerank_used = True
-                    span.set_attribute("rerank_used", True)
-                except Exception as e:
-                    logger.warning(f"Vertex AI rerank failed, falling back to hybrid score: {e}")
-                    reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
-                    span.set_attribute("rerank_used", False)
-                    span.set_attribute("error", str(e))
-        else:
-            reranked_rows = sorted(rows, key=lambda r: float(r["vec_dist"]) - float(r["keyword_bonus"]))
-
-        # Deduplicate product rows by name; keep all FAQs and review summaries
-        seen_names: dict = {}
-        deduped = []
-        for row in reranked_rows:
-            if row["doc_type"] == "product":
-                meta = json.loads(row["metadata"])
-                name = meta.get("name", "")
-                if name not in seen_names:
-                    seen_names[name] = row
-                    deduped.append(row)
-            else:
-                deduped.append(row)
-        dedup_removed = len(reranked_rows) - len(deduped)
-        ranked = deduped[:8]
-
-        vec_distances = [float(r["vec_dist"]) for r in ranked]
-        avg_dist = sum(vec_distances) / len(vec_distances)
-        min_vec_distance = round(min(vec_distances), 4)
-        low_confidence = avg_dist > 0.6
-        product_rows = [r for r in ranked if r["doc_type"] == "product"]
-        rag_meta.update({
-            "rag_confidence": round(avg_dist, 4),
-            "min_vec_distance": min_vec_distance,
-            "rag_empty": False,
-            "dedup_removed_count": dedup_removed,
-            "unique_brands_count": len({json.loads(r["metadata"]).get("brand") for r in product_rows}),
-            "unique_categories_count": len({json.loads(r["metadata"]).get("category") for r in product_rows}),
-            "rerank_used": rerank_used,
-        })
-
-        context_parts = []
-        sources = []
-        for row in ranked:
-            context_parts.append(row["content"])
-            if row["doc_type"] == "product":
-                meta = json.loads(row["metadata"])
-                sources.append({"id": row["source_id"], "name": meta.get("name", ""), "price": float(meta.get("price", 0)), "category": meta.get("category", "")})
-
-        context = "\n\n---\n\n".join(context_parts)
-        if low_confidence:
-            context += f"\n\n[Note: Low confidence match. Available categories: {', '.join(CATEGORY_KEYWORDS.keys())}]"
-
-        return context, sources, rag_meta
-
-    except Exception as e:
-        logger.warning(f"RAG retrieval failed: {e}")
-        return "", [], {"rag_confidence": None, "rag_empty": True, "price_filter_used": False,
-                        "price_filter_value": None, "detected_category": None, "rerank_used": False}
+_session_limiter = _RateLimiter(max_requests=30, window_seconds=600)
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """You are ShopRight's expert AI assistant for a home improvement store. You are knowledgeable, precise, and safety-conscious.
@@ -554,28 +148,6 @@ For out-of-scope questions, respond: "I'm here to help with home improvement pro
 - Bullet points for feature lists.
 - Keep responses under 300 words unless detailed instructions are requested."""
 
-# ── ADK Tool: search_products ─────────────────────────────────────────────────
-async def search_products(query: str) -> str:
-    """Search the ShopRight knowledge base: products, FAQs, and customer reviews.
-
-    Use this tool whenever the user asks about products, prices, brands, recommendations,
-    comparisons, store policies (returns, shipping, warranty), or any question that
-    ShopRight's catalog or FAQ data could answer.
-
-    Args:
-        query: Search query describing what the customer is looking for.
-
-    Returns:
-        Relevant product listings with names, prices, descriptions, and specifications,
-        plus any FAQ answers and customer review summaries related to the query.
-    """
-    context, sources, rag_meta = await get_relevant_context(query)
-    mid = _cv_message_id.get("")
-    if mid:
-        _sources_store[mid] = sources
-        _rag_meta_store[mid] = rag_meta
-    return context if context else "No matching products found in our catalog for that query."
-
 # ── ADK Agent + Runner ────────────────────────────────────────────────────────
 _session_service = InMemorySessionService()
 
@@ -601,193 +173,18 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
 )
 
+
 @app.on_event("startup")
 async def startup():
-    global _db_pool
     preload_embed()
     logger.info(f"[startup] Embed model: {embed_model_name()}")
     try:
-        _db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
+        state._db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=5)
         logger.info("[startup] asyncpg connection pool created (min=2, max=5)")
     except Exception as e:
         logger.warning(f"[startup] DB pool creation failed — will fall back to per-request connect: {e}")
 
-# ── Pydantic models ────────────────────────────────────────────────────────────
-class ChatMessage(BaseModel):
-    role: str
-    content: str
 
-class ChatRequest(BaseModel):
-    message: str
-    session_id: Optional[str] = None
-    history: Optional[List[ChatMessage]] = []  # used for seeding on pod restart
-    session_started_at: Optional[str] = None
-
-class ProductSource(BaseModel):
-    id: str
-    name: str
-    price: float
-    category: str = ""
-
-class ChatResponse(BaseModel):
-    response: str
-    session_id: str
-    message_id: str
-    sources: List[ProductSource] = []
-    is_unanswered: bool = False
-    session_ending: bool = False
-
-class FeedbackRequest(BaseModel):
-    message_id: str
-    session_id: str
-    rating: int
-    user_message: Optional[str] = None
-    assistant_response: Optional[str] = None
-
-class ReviewRequest(BaseModel):
-    session_id: str
-    stars: int
-    turn_count: Optional[int] = None
-    unanswered_count: Optional[int] = None
-
-class AnalyticsEventRequest(BaseModel):
-    event_type: str
-    session_id: str
-    message_id: Optional[str] = None
-    product_id: Optional[str] = None
-    product_name: Optional[str] = None
-    product_price: Optional[float] = None
-    product_category: Optional[str] = None
-
-# ── Intent classification + target extraction ─────────────────────────────────
-_INTENT_LABELS = (
-    "product_lookup",       # searching for a specific product
-    "project_advice",       # how-to / DIY project guidance
-    "compatibility",        # will X work with Y
-    "pricing_availability", # price, cost, stock, availability
-    "troubleshooting",      # diagnosing or fixing a problem
-    "general_chat",         # greetings, thanks, off-topic
-)
-_INTENT_PROMPT = (
-    "Classify the following customer message into exactly one of these intent labels:\n"
-    + ", ".join(_INTENT_LABELS)
-    + "\n\nRespond with only the label — no explanation.\n\nMessage: "
-)
-_TARGET_PROMPT = (
-    "Extract the specific product, material, or topic the customer is asking about in 1-5 words. "
-    "Examples: 'cordless drill', 'deck lumber', 'garbage disposal', 'bathroom tile', 'paint primer'. "
-    "If the message is general or a greeting, respond with 'general'. "
-    "Respond with only the extracted term — no explanation.\n\nMessage: "
-)
-
-async def classify_intent(message: str) -> str:
-    if not _genai_client:
-        return "unknown"
-    try:
-        resp = await _genai_client.aio.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=_INTENT_PROMPT + message[:500],
-        )
-        label = resp.text.strip().lower().split()[0].rstrip(".,")
-        return label if label in _INTENT_LABELS else "unknown"
-    except Exception as e:
-        logger.warning(f"Intent classification failed: {e}")
-        return "unknown"
-
-async def extract_intent_target(message: str) -> str:
-    if not _genai_client:
-        return ""
-    try:
-        resp = await _genai_client.aio.models.generate_content(
-            model="gemini-2.0-flash-lite",
-            contents=_TARGET_PROMPT + message[:500],
-        )
-        return resp.text.strip()[:100]
-    except Exception as e:
-        logger.warning(f"Intent target extraction failed: {e}")
-        return ""
-
-def compute_rec_gap(user_intent_target: str, sources: list, is_unanswered: bool) -> bool:
-    """True when the bot surfaced products but none matched what the user wanted."""
-    if not user_intent_target or user_intent_target.lower() in ("general", ""):
-        return False
-    if is_unanswered:
-        return True
-    if not sources:
-        return False
-    target_words = set(user_intent_target.lower().split())
-    for s in sources:
-        name = (s.get("name", "") if isinstance(s, dict) else getattr(s, "name", "")).lower()
-        if any(w in name for w in target_words):
-            return False
-    return True
-
-# ── BigQuery logging ───────────────────────────────────────────────────────────
-async def log_to_bigquery(session_id, message_id, user_message, assistant_response, sources, latency_ms, is_unanswered, extra: dict | None = None):
-    if not GCP_PROJECT:
-        return
-    try:
-        # Derive: previous turn unanswered (for frustration detection)
-        prev_unanswered = next(
-            (m.get("is_unanswered", False) for m in reversed(_req_metrics)
-             if m.get("session_id") == session_id and m.get("message_id") != message_id),
-            False,
-        )
-        frustration_signal, frustration_reason = detect_frustration(user_message, session_id, prev_unanswered)
-
-        # Batch the two Gemini classification calls
-        intent, user_intent_target = await asyncio.gather(
-            classify_intent(user_message),
-            extract_intent_target(user_message),
-        )
-
-        rec_gap = compute_rec_gap(user_intent_target, sources, is_unanswered)
-
-        # Update sliding prev-message window after classification
-        _session_prev_message[session_id] = user_message
-
-        row = {
-            "session_id": session_id, "message_id": message_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "user_message": user_message, "assistant_response": assistant_response,
-            "sources_used": json.dumps(sources if isinstance(sources[0], dict) else [s.model_dump() for s in sources]) if sources else "[]",
-            "message_length": len(user_message), "response_length": len(assistant_response),
-            "sources_count": len(sources), "latency_ms": latency_ms, "is_unanswered": is_unanswered,
-            "intent": intent,
-            "frustration_signal": frustration_signal,
-            "frustration_reason": frustration_reason,
-            "user_intent_target": user_intent_target,
-            "rec_gap": rec_gap,
-        }
-        if extra:
-            row.update(extra)
-        bq = bigquery.Client(project=GCP_PROJECT)
-        errors = bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}", [row])
-        if errors:
-            logger.error(f"BigQuery insert errors for {message_id}: {errors}")
-    except Exception as e:
-        logger.error(f"Failed to log to BigQuery: {e}")
-
-async def log_feedback_to_bigquery(message_id, session_id, rating, user_message, assistant_response, turn_number=None, detected_category=None):
-    if not GCP_PROJECT:
-        return
-    try:
-        row = {
-            "message_id": message_id, "session_id": session_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "rating": rating, "user_message": user_message or "",
-            "assistant_response": assistant_response or "",
-        }
-        if turn_number is not None:
-            row["turn_number"] = turn_number
-        if detected_category is not None:
-            row["detected_category"] = detected_category
-        bq = bigquery.Client(project=GCP_PROJECT)
-        bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_FEEDBACK_TABLE}", [row])
-    except Exception as e:
-        logger.error(f"Failed to log feedback to BigQuery: {e}")
-
-# ── Helper: ensure ADK session exists ────────────────────────────────────────
 async def _ensure_session(session_id: str, history: list[ChatMessage]) -> None:
     """Create an ADK session if it doesn't exist. Seeds history into context on pod restart."""
     existing = await _session_service.get_session(
@@ -813,6 +210,7 @@ async def _ensure_session(session_id: str, history: list[ChatMessage]) -> None:
                     ),
                 )
 
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
@@ -834,8 +232,8 @@ async def health_deep():
         checks["database"] = f"error: {str(e)[:120]}"
         overall = "degraded"
 
-    checks["gemini_key"]      = "configured" if GEMINI_API_KEY else "missing"
-    checks["vertex_rerank"]   = "enabled" if GCP_PROJECT else "disabled (no GCP_PROJECT_ID)"
+    checks["gemini_key"]    = "configured" if GEMINI_API_KEY else "missing"
+    checks["vertex_rerank"] = "enabled" if GCP_PROJECT else "disabled (no GCP_PROJECT_ID)"
     if not GEMINI_API_KEY:
         overall = "degraded"
 
@@ -851,12 +249,10 @@ async def chat_stream(request: ChatRequest):
     session_id = request.session_id or str(uuid.uuid4())
     message_id = str(uuid.uuid4())
 
-    # Rate limit: 30 requests per 10 minutes per session
     if not _session_limiter.is_allowed(session_id):
         logger.warning(f"[rate_limit] session={session_id}")
         raise HTTPException(status_code=429, detail="Too many requests. Please wait a moment.")
 
-    # Prompt injection detection — hard-block before reaching the LLM
     is_injection, injection_pattern = detect_prompt_injection(request.message)
     if is_injection:
         logger.warning(f"[injection] pattern={injection_pattern} session={session_id}")
@@ -869,7 +265,6 @@ async def chat_stream(request: ChatRequest):
             ))
         return StreamingResponse(_blocked(), media_type="text/event-stream", headers={"X-Accel-Buffering": "no"})
 
-    # Vulgar / sexual content — hard-block before reaching the LLM
     is_vulgar, vulgar_pattern = detect_vulgar(request.message)
     if is_vulgar:
         logger.warning(f"[vulgar] pattern={vulgar_pattern} session={session_id}")
@@ -887,7 +282,6 @@ async def chat_stream(request: ChatRequest):
         history = request.history or []
         turn_number = len([m for m in history if m.role == "assistant"]) + 1
 
-        # Short-circuit: wellbeing / emotional distress
         if is_wellbeing_message(request.message):
             yield f"data: {json.dumps({'token': WELLBEING_RESPONSE, 'done': False})}\n\n"
             latency_ms = int((time.monotonic() - t0) * 1000)
@@ -896,27 +290,24 @@ async def chat_stream(request: ChatRequest):
                  "timestamp": datetime.now(timezone.utc).isoformat(),
                  "latency_ms": latency_ms, "turn_number": turn_number,
                  "wellbeing_triggered": True, "is_unanswered": False, "llm_error": False}
-            _req_metrics.append(m)
-            if len(_req_metrics) > 1000: _req_metrics.pop(0)
+            state._req_metrics.append(m)
+            if len(state._req_metrics) > 1000: state._req_metrics.pop(0)
             asyncio.create_task(log_to_bigquery(
                 session_id, message_id, request.message, WELLBEING_RESPONSE, [], latency_ms, False,
                 extra={"turn_number": turn_number, "wellbeing_triggered": True},
             ))
             return
 
-        # Short-circuit: session ending
         if is_session_ending(request.message, history):
             for token in SESSION_END_RESPONSE.split(" "):
                 yield f"data: {json.dumps({'token': token + ' ', 'done': False})}\n\n"
             yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': [], 'is_unanswered': False, 'session_ending': True})}\n\n"
             return
 
-        # Ensure ADK session exists (creates or uses existing)
         try:
             await _ensure_session(session_id, history)
         except Exception as e:
             logger.warning(f"Session setup warning (non-fatal): {e}")
-            # Fall back to simple session creation without history seeding
             try:
                 await _session_service.create_session(
                     app_name="shopright", user_id="anon", session_id=session_id
@@ -924,12 +315,10 @@ async def chat_stream(request: ChatRequest):
             except Exception:
                 pass
 
-        # Bind message_id into ContextVar so the ADK tool can write sources to the store
-        _cv_message_id.set(message_id)
-        _sources_store.pop(message_id, None)
-        _rag_meta_store.pop(message_id, None)
+        state._cv_message_id.set(message_id)
+        state._sources_store.pop(message_id, None)
+        state._rag_meta_store.pop(message_id, None)
 
-        # Run ADK agent, streaming tokens
         full_response = ""
         t_llm = time.monotonic()
         rag_ms = None
@@ -953,19 +342,16 @@ async def chat_stream(request: ChatRequest):
                     if not event.content or not event.content.parts:
                         continue
 
-                    # Skip tool call / tool response events
                     has_function = any(
                         hasattr(p, "function_call") and p.function_call
                         or hasattr(p, "function_response") and p.function_response
                         for p in event.content.parts
                     )
                     if has_function:
-                        # Record when the tool ran (RAG timing)
                         if rag_ms is None:
                             rag_ms = int((time.monotonic() - t_llm) * 1000)
                         continue
 
-                    # Extract text parts from LLM response
                     for part in event.content.parts:
                         text = getattr(part, "text", None)
                         if not text:
@@ -991,20 +377,17 @@ async def chat_stream(request: ChatRequest):
             llm_span.set_attribute("tokens_out", tokens_out or 0)
         latency_ms = int((time.monotonic() - t0) * 1000)
 
-        # Retrieve sources written by search_products tool (via module-level store)
-        raw_sources = _sources_store.pop(message_id, [])
-        rag_meta    = _rag_meta_store.pop(message_id, {})
+        raw_sources = state._sources_store.pop(message_id, [])
+        rag_meta    = state._rag_meta_store.pop(message_id, {})
 
-        # Filter to sources Gemini actually mentioned in the response
         mentioned = [s for s in raw_sources if s["name"].lower() in full_response.lower()]
-        final_sources = mentioned  # only show chips for products the bot actually named
+        final_sources = mentioned
 
         is_unanswered = detect_unanswered(full_response, len(final_sources), history)
 
         yield f"data: {json.dumps({'done': True, 'message_id': message_id, 'session_id': session_id, 'sources': final_sources, 'is_unanswered': is_unanswered, 'session_ending': False})}\n\n"
 
-        # Metrics
-        cost = ((tokens_in or 0) / 1e6 * _COST_PER_1M_IN) + ((tokens_out or 0) / 1e6 * _COST_PER_1M_OUT)
+        cost = ((tokens_in or 0) / 1e6 * COST_PER_1M_IN) + ((tokens_out or 0) / 1e6 * COST_PER_1M_OUT)
         m = {
             "session_id": session_id, "message_id": message_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1043,9 +426,9 @@ async def chat_stream(request: ChatRequest):
             )) if raw_sources else None,
             "context_pct": round(tokens_in / GEMINI_CONTEXT_LIMIT * 100, 1) if tokens_in else None,
         }
-        _req_metrics.append(m)
-        if len(_req_metrics) > 1000:
-            _req_metrics.pop(0)
+        state._req_metrics.append(m)
+        if len(state._req_metrics) > 1000:
+            state._req_metrics.pop(0)
 
         _conf = rag_meta.get("rag_confidence")
         _conf_str = f"{_conf:.3f}" if _conf is not None else "N/A"
@@ -1097,8 +480,8 @@ async def chat(request: ChatRequest):
         return ChatResponse(response=_VULGAR_RESPONSE, session_id=session_id,
                             message_id=message_id, sources=[], is_unanswered=False)
 
-    _cv_message_id.set(message_id)
-    _sources_store.pop(message_id, None)
+    state._cv_message_id.set(message_id)
+    state._sources_store.pop(message_id, None)
 
     full_response = ""
     try:
@@ -1114,9 +497,9 @@ async def chat(request: ChatRequest):
         logger.error(f"ADK runner error (non-stream): {e}")
         raise HTTPException(status_code=502, detail="LLM error")
 
-    raw_sources = _sources_store.pop(message_id, [])
+    raw_sources = state._sources_store.pop(message_id, [])
     mentioned = [s for s in raw_sources if s["name"].lower() in full_response.lower()]
-    final_sources = mentioned  # only show chips for products the bot actually named
+    final_sources = mentioned
     is_unanswered = detect_unanswered(full_response, len(final_sources), history)
     latency_ms = int((time.monotonic() - t0) * 1000)
 
@@ -1134,7 +517,7 @@ async def chat(request: ChatRequest):
 async def feedback(request: FeedbackRequest):
     if request.rating not in (1, -1):
         raise HTTPException(status_code=400, detail="rating must be 1 (up) or -1 (down)")
-    metric = next((m for m in _req_metrics if m.get("message_id") == request.message_id), {})
+    metric = next((m for m in state._req_metrics if m.get("message_id") == request.message_id), {})
     asyncio.create_task(log_feedback_to_bigquery(
         request.message_id, request.session_id, request.rating,
         request.user_message or "", request.assistant_response or "",
@@ -1189,35 +572,35 @@ async def review(request: ReviewRequest):
 
 @app.get("/metrics/summary")
 async def metrics_summary():
-    if not _req_metrics:
+    if not state._req_metrics:
         return {"message": "No requests yet — send some chat messages first"}
 
-    n = len(_req_metrics)
-    latencies       = sorted(m["latency_ms"] for m in _req_metrics)
-    unanswered      = [m for m in _req_metrics if m["is_unanswered"]]
-    errors          = [m for m in _req_metrics if m.get("llm_error")]
-    price_filtered  = [m for m in _req_metrics if m.get("price_filter_used")]
-    rag_empty       = [m for m in _req_metrics if m.get("rag_empty")]
+    n = len(state._req_metrics)
+    latencies      = sorted(m["latency_ms"] for m in state._req_metrics)
+    unanswered     = [m for m in state._req_metrics if m["is_unanswered"]]
+    errors         = [m for m in state._req_metrics if m.get("llm_error")]
+    price_filtered = [m for m in state._req_metrics if m.get("price_filter_used")]
+    rag_empty      = [m for m in state._req_metrics if m.get("rag_empty")]
 
-    rag_times   = sorted(m["rag_ms"]   for m in _req_metrics if m.get("rag_ms"))
-    llm_times   = sorted(m["llm_ms"]   for m in _req_metrics if m.get("llm_ms"))
-    ttft_times  = sorted(m["ttft_ms"]  for m in _req_metrics if m.get("ttft_ms"))
-    embed_times = sorted(m["embed_ms"] for m in _req_metrics if m.get("embed_ms"))
-    db_times    = sorted(m["db_ms"]    for m in _req_metrics if m.get("db_ms"))
+    rag_times   = sorted(m["rag_ms"]   for m in state._req_metrics if m.get("rag_ms"))
+    llm_times   = sorted(m["llm_ms"]   for m in state._req_metrics if m.get("llm_ms"))
+    ttft_times  = sorted(m["ttft_ms"]  for m in state._req_metrics if m.get("ttft_ms"))
+    embed_times = sorted(m["embed_ms"] for m in state._req_metrics if m.get("embed_ms"))
+    db_times    = sorted(m["db_ms"]    for m in state._req_metrics if m.get("db_ms"))
 
     error_types: dict = defaultdict(int)
-    for m in _req_metrics:
+    for m in state._req_metrics:
         if m.get("llm_error_type"):
             error_types[m["llm_error_type"]] += 1
 
-    tokens_in  = [m["tokens_in"]  for m in _req_metrics if m.get("tokens_in")]
-    tokens_out = [m["tokens_out"] for m in _req_metrics if m.get("tokens_out")]
-    costs      = [m["estimated_cost_usd"] for m in _req_metrics if m.get("estimated_cost_usd")]
-    confs      = [m["rag_confidence"] for m in _req_metrics if m.get("rag_confidence")]
-    turns      = [m["turn_number"] for m in _req_metrics]
+    tokens_in  = [m["tokens_in"]  for m in state._req_metrics if m.get("tokens_in")]
+    tokens_out = [m["tokens_out"] for m in state._req_metrics if m.get("tokens_out")]
+    costs      = [m["estimated_cost_usd"] for m in state._req_metrics if m.get("estimated_cost_usd")]
+    confs      = [m["rag_confidence"] for m in state._req_metrics if m.get("rag_confidence")]
+    turns      = [m["turn_number"] for m in state._req_metrics]
 
     cat_stats: dict = defaultdict(lambda: {"requests": 0, "unanswered": 0})
-    for m in _req_metrics:
+    for m in state._req_metrics:
         cat = m.get("detected_category") or "General / Conversational"
         cat_stats[cat]["requests"] += 1
         if m["is_unanswered"]:
@@ -1265,16 +648,16 @@ async def metrics_summary():
             for cat, v in sorted(cat_stats.items(), key=lambda x: -x[1]["requests"])
         },
         "safety": {
-            "wellbeing_rate": pct([m for m in _req_metrics if m.get("wellbeing_triggered")]),
-            "hallucination_flag_rate": pct([m for m in _req_metrics if m.get("hallucination_flag")]),
+            "wellbeing_rate": pct([m for m in state._req_metrics if m.get("wellbeing_triggered")]),
+            "hallucination_flag_rate": pct([m for m in state._req_metrics if m.get("hallucination_flag")]),
         },
         "rag_quality": {
-            "avg_dedup_removed": round(sum(m.get("dedup_removed_count", 0) for m in _req_metrics) / n, 2),
-            "avg_unique_brands_per_response": round(sum(m.get("unique_brands_count", 0) for m in _req_metrics) / n, 2),
-            "avg_unique_categories_per_response": round(sum(m.get("unique_categories_count", 0) for m in _req_metrics) / n, 2),
+            "avg_dedup_removed": round(sum(m.get("dedup_removed_count", 0) for m in state._req_metrics) / n, 2),
+            "avg_unique_brands_per_response": round(sum(m.get("unique_brands_count", 0) for m in state._req_metrics) / n, 2),
+            "avg_unique_categories_per_response": round(sum(m.get("unique_categories_count", 0) for m in state._req_metrics) / n, 2),
         },
         "context_saturation": {
-            "avg_context_pct": round(sum(m.get("context_pct", 0) or 0 for m in _req_metrics) / n, 1),
-            "max_context_pct": max((m.get("context_pct") or 0 for m in _req_metrics), default=0),
+            "avg_context_pct": round(sum(m.get("context_pct", 0) or 0 for m in state._req_metrics) / n, 1),
+            "max_context_pct": max((m.get("context_pct") or 0 for m in state._req_metrics), default=0),
         },
     }
