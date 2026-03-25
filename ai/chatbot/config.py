@@ -19,8 +19,8 @@ GCP_REGION        = os.getenv("GCP_REGION", "us-central1")
 GEMINI_CONTEXT_LIMIT   = 1_000_000
 COST_PER_1M_IN         = 0.30    # gemini-2.5-flash input
 COST_PER_1M_OUT        = 2.50    # gemini-2.5-flash output
-INTENT_COST_PER_1M_IN  = 0.075   # gemini-2.0-flash input (intent classification)
-INTENT_COST_PER_1M_OUT = 0.30    # gemini-2.0-flash output (intent classification)
+INTENT_COST_PER_1M_IN  = 0.30    # gemini-2.5-flash input (intent classification)
+INTENT_COST_PER_1M_OUT = 2.50    # gemini-2.5-flash output (intent classification)
 
 # ── Gemini client for lightweight classification calls ────────────────────────
 _genai_client = None
