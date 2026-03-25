@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from google.cloud import bigquery
 
-from config import GCP_PROJECT, BQ_DATASET, BQ_TABLE, BQ_FEEDBACK_TABLE
+from config import GCP_PROJECT, BQ_DATASET, BQ_TABLE, BQ_FEEDBACK_TABLE, INTENT_COST_PER_1M_IN, INTENT_COST_PER_1M_OUT
 from detection import detect_frustration, _session_prev_message
 from intent import classify_intent, extract_intent_target, compute_rec_gap
 import state
@@ -32,10 +32,11 @@ async def log_to_bigquery(
         frustration_signal, frustration_reason = detect_frustration(user_message, session_id, prev_unanswered)
 
         # Batch the two Gemini classification calls
-        intent, user_intent_target = await asyncio.gather(
-            classify_intent(user_message),
-            extract_intent_target(user_message),
-        )
+        (intent, intent_in, intent_out), (user_intent_target, target_in, target_out) = \
+            await asyncio.gather(
+                classify_intent(user_message),
+                extract_intent_target(user_message),
+            )
 
         rec_gap = compute_rec_gap(user_intent_target, sources, is_unanswered)
 
@@ -57,6 +58,11 @@ async def log_to_bigquery(
         }
         if extra:
             row.update(extra)
+        intent_cost = (
+            (intent_in + target_in)  / 1e6 * INTENT_COST_PER_1M_IN +
+            (intent_out + target_out) / 1e6 * INTENT_COST_PER_1M_OUT
+        )
+        row["estimated_cost_usd"] = round((row.get("estimated_cost_usd") or 0) + intent_cost, 8)
         bq = bigquery.Client(project=GCP_PROJECT)
         errors = bq.insert_rows_json(f"{GCP_PROJECT}.{BQ_DATASET}.{BQ_TABLE}", [row])
         if errors:

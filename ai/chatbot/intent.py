@@ -28,33 +28,41 @@ _TARGET_PROMPT = (
 )
 
 
-async def classify_intent(message: str) -> str:
+async def classify_intent(message: str) -> tuple[str, int, int]:
+    """Returns (label, tokens_in, tokens_out)."""
     if not _genai_client:
-        return "unknown"
+        return "unknown", 0, 0
     try:
         resp = await _genai_client.aio.models.generate_content(
             model="gemini-2.0-flash",
             contents=_INTENT_PROMPT + message[:500],
         )
         label = resp.text.strip().lower().split()[0].rstrip(".,")
-        return label if label in _INTENT_LABELS else "unknown"
+        usage = resp.usage_metadata
+        tokens_in  = getattr(usage, "prompt_token_count", 0) or 0
+        tokens_out = getattr(usage, "candidates_token_count", 0) or 0
+        return (label if label in _INTENT_LABELS else "unknown"), tokens_in, tokens_out
     except Exception as e:
         logger.warning(f"Intent classification failed: {e}")
-        return "unknown"
+        return "unknown", 0, 0
 
 
-async def extract_intent_target(message: str) -> str:
+async def extract_intent_target(message: str) -> tuple[str, int, int]:
+    """Returns (target, tokens_in, tokens_out)."""
     if not _genai_client:
-        return ""
+        return "", 0, 0
     try:
         resp = await _genai_client.aio.models.generate_content(
             model="gemini-2.0-flash",
             contents=_TARGET_PROMPT + message[:500],
         )
-        return resp.text.strip()[:100]
+        usage = resp.usage_metadata
+        tokens_in  = getattr(usage, "prompt_token_count", 0) or 0
+        tokens_out = getattr(usage, "candidates_token_count", 0) or 0
+        return resp.text.strip()[:100], tokens_in, tokens_out
     except Exception as e:
         logger.warning(f"Intent target extraction failed: {e}")
-        return ""
+        return "", 0, 0
 
 
 def compute_rec_gap(user_intent_target: str, sources: list, is_unanswered: bool) -> bool:

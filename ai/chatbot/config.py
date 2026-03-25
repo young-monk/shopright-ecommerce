@@ -15,10 +15,12 @@ BQ_FEEDBACK_TABLE = os.getenv("BIGQUERY_FEEDBACK_TABLE", "feedback")
 BQ_EVENTS_TABLE   = os.getenv("BIGQUERY_EVENTS_TABLE", "chat_events")
 GCP_REGION        = os.getenv("GCP_REGION", "us-central1")
 
-# ── LLM cost constants (Gemini-2.5-flash, per 1M tokens) ─────────────────────
-GEMINI_CONTEXT_LIMIT = 1_000_000
-COST_PER_1M_IN       = 0.075
-COST_PER_1M_OUT      = 0.30
+# ── LLM cost constants (per 1M tokens) ───────────────────────────────────────
+GEMINI_CONTEXT_LIMIT   = 1_000_000
+COST_PER_1M_IN         = 0.30    # gemini-2.5-flash input
+COST_PER_1M_OUT        = 2.50    # gemini-2.5-flash output
+INTENT_COST_PER_1M_IN  = 0.075   # gemini-2.0-flash input (intent classification)
+INTENT_COST_PER_1M_OUT = 0.30    # gemini-2.0-flash output (intent classification)
 
 # ── Gemini client for lightweight classification calls ────────────────────────
 _genai_client = None
