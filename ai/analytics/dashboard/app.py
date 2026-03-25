@@ -387,7 +387,7 @@ def tech_page(days: int) -> None:
     latency_bd = _tech_latency_breakdown(days)
 
     # ── Row 1: Retrieval pipeline (search quality) ────────────────────────────
-    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    c1, c2, c3 = st.columns(3)
     with c1:
         val = _scalar(s, "avg_rag_confidence")
         icon = "🔴" if val > 0.6 else "🟡" if val > 0.4 else "🟢"
@@ -399,55 +399,36 @@ def tech_page(days: int) -> None:
         st.metric("RAG Empty Rate", f"{icon} {val:.1f}%",
                   help="% of queries where vector search returned zero results — harder gap than rec_gap (wrong products; this means no products at all). 🟢 ≤ 3% · 🟡 ≤ 10% · 🔴 > 10%")
     with c3:
-        val = int(_scalar(s, "avg_ann_candidates"))
-        icon = "🔴" if val < 10 else "🟡" if val < 20 else "🟢"
-        st.metric("Avg ANN Candidates", f"{icon} {val}",
-                  help="Average number of ANN vector search candidates retrieved before reranking. Low values mean the HNSW index is returning few matches — may indicate catalog coverage or embedding quality issues. 🟢 ≥ 20 · 🟡 ≥ 10 · 🔴 < 10")
-    with c4:
-        val = _scalar(s, "avg_sources_count")
-        icon = "🔴" if val < 2 else "🟡" if val < 4 else "🟢"
-        st.metric("Avg Sources / Query", f"{icon} {val:.1f}",
-                  help="Average number of RAG source documents passed to the LLM per query. Low values may indicate embedding quality issues. 🟢 ≥ 4 · 🟡 ≥ 2 · 🔴 < 2")
-    with c5:
         val = _scalar(s, "avg_unique_brands")
         icon = "🟢" if val >= 2 else "🟡"
         st.metric("Avg Brands / Query", f"{icon} {val:.1f}",
                   help="Average number of distinct brands in retrieved results per query. Low diversity may mean the catalog is brand-concentrated. 🟢 ≥ 2 · 🟡 < 2")
-    with c6:
-        val = _scalar(s, "price_filter_rate_pct")
-        st.metric("Price Filter Rate", f"{val:.1f}%",
-                  help="% of queries where the bot detected a budget constraint (e.g. 'under $80', 'max $200'). High values signal price-sensitive users — ensure the catalog has enough options at various price points.")
 
     # ── Row 2: Answer quality & safety ────────────────────────────────────────
-    r1, r2, r3, r4, r5 = st.columns(5)
+    r1, r2, r3, r4 = st.columns(4)
     with r1:
-        val = _scalar(s, "rerank_used_pct")
-        icon = "🔴" if val < 50 else "🟢"
-        st.metric("Rerank Used", f"{icon} {val:.1f}%",
-                  help="% of queries where Vertex AI Ranking API successfully reranked results. Low values mean the reranker is falling back to hybrid score. 🟢 ≥ 50% · 🔴 < 50%")
-    with r2:
         val = _scalar(s, "citation_gap_rate_pct")
         icon = "🔴" if val > 5 else "🟢"
         st.metric("Citation Gap Rate", f"{icon} {val:.1f}%",
                   help="Heuristic: bot had RAG sources but product names didn't appear in its response — proxy for hallucination. 🟢 ≤ 5% · 🔴 > 5%")
-    with r3:
+    with r2:
         val = _scalar(s, "rec_gap_rate_pct")
         icon = "🔴" if val > 10 else "🟡" if val > 5 else "🟢"
         st.metric("Rec Gap Rate", f"{icon} {val:.1f}%",
                   help="% of messages where no product matched what the user asked for — proxy for catalog coverage gaps. 🟢 ≤ 5% · 🟡 ≤ 10% · 🔴 > 10%")
-    with r4:
+    with r3:
         val = _scalar(s, "frustration_rate_pct")
         icon = "🔴" if val > 15 else "🟡" if val > 8 else "🟢"
         st.metric("Frustration Rate", f"{icon} {val:.1f}%",
                   help="% of messages where the user showed frustration signals (repeated rephrasing, negative sentiment). 🟢 ≤ 8% · 🟡 ≤ 15% · 🔴 > 15%")
-    with r5:
+    with r4:
         val = int(_scalar(s, "wellbeing_triggered_count"))
         icon = "🔴" if val > 0 else "🟢"
         st.metric("Wellbeing Triggers", f"{icon} {val}",
                   help="Count of messages that triggered a wellbeing safety response (e.g. distress signals detected). Any non-zero value should be reviewed.")
 
     # ── Row 3: Cost & session depth ───────────────────────────────────────────
-    t1, t2, t3, t4, t5, t6 = st.columns(6)
+    t1, t2, t3, t4 = st.columns(4)
     with t1:
         st.metric("Total LLM Cost", f"${_scalar(s, 'total_cost_usd'):.4f}",
                   help="Estimated Gemini API cost for the period, based on tokens in/out at published rates.")
@@ -460,19 +441,10 @@ def tech_page(days: int) -> None:
         st.metric("Avg Tokens Out", f"{val:,}",
                   help="Average output token count per message. Higher values = longer bot responses. Directly drives LLM cost.")
     with t4:
-        val = _scalar(s, "avg_context_pct")
-        icon = "🔴" if val > 50 else "🟡" if val > 20 else "🟢"
-        st.metric("Avg Context Used", f"{icon} {val:.1f}%",
-                  help="Average % of Gemini's 1M-token context window consumed per request. 🟢 < 20% · 🟡 < 50% · 🔴 ≥ 50% — high values risk context truncation in long sessions.")
-    with t5:
         val = _scalar(s, "avg_turn_number")
         icon = "🟢" if val >= 3 else "🟡"
         st.metric("Avg Turn Depth", f"{icon} {val:.1f}",
                   help="Average turn number within a session — measures conversation engagement. Higher = more engaged users. 🟢 ≥ 3 turns · 🟡 < 3 turns")
-    with t6:
-        val = _scalar(s, "query_rewritten_rate_pct")
-        st.metric("Query Rewrite Rate", f"{val:.1f}%",
-                  help="% of queries rewritten before embedding (coreference resolution, history deduplication). Higher = more multi-turn conversations benefiting from rewriting.")
 
     if not daily.empty:
         st.subheader("RAG Confidence Over Time (cosine distance — lower is better)")
