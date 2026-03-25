@@ -355,6 +355,14 @@ async def chat_stream(request: ChatRequest):
                 yield f"data: {json.dumps({'token': err_msg, 'done': False})}\n\n"
 
             llm_ms = int((time.monotonic() - t_llm) * 1000)
+            # ADK does not expose usage_metadata via events — estimate from text length.
+            # Standard approximation: 1 token ≈ 4 chars for English text.
+            if tokens_out is None and full_response:
+                tokens_out = max(1, len(full_response) // 4)
+            if tokens_in is None:
+                history_chars = sum(len(m.content) for m in history)
+                rag_ctx_chars = len(str(state._sources_store.get(message_id, "")))
+                tokens_in = max(1, (len(request.message) + history_chars + rag_ctx_chars) // 4 + 512)
             llm_span.set_attribute("llm_ms", llm_ms)
             llm_span.set_attribute("ttft_ms", ttft_ms or 0)
             llm_span.set_attribute("tokens_in", tokens_in or 0)

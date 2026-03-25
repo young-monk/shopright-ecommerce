@@ -34,7 +34,7 @@ async def classify_intent(message: str) -> tuple[str, int, int]:
         return "unknown", 0, 0
     try:
         resp = await _genai_client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.0-flash-001",
             contents=_INTENT_PROMPT + message[:500],
         )
         label = resp.text.strip().lower().split()[0].rstrip(".,")
@@ -53,7 +53,7 @@ async def extract_intent_target(message: str) -> tuple[str, int, int]:
         return "", 0, 0
     try:
         resp = await _genai_client.aio.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-2.0-flash-001",
             contents=_TARGET_PROMPT + message[:500],
         )
         usage = resp.usage_metadata
