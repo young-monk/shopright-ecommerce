@@ -560,25 +560,14 @@ def business_page(days: int) -> None:
         fig2.update_layout(height=260, margin=dict(t=10, b=10))
         st.plotly_chart(fig2, use_container_width=True)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        outcomes = _biz_outcomes(days)
-        if not outcomes.empty:
-            st.subheader("Session Outcomes")
-            fig3 = px.pie(outcomes, names="outcome", values="sessions",
-                          color_discrete_sequence=px.colors.qualitative.Set2)
-            fig3.update_layout(height=300, margin=dict(t=10, b=10))
-            st.plotly_chart(fig3, use_container_width=True)
-
-    with col2:
-        products = _biz_top_products(days)
-        if not products.empty:
-            st.subheader("Top Clicked Products")
-            fig4 = px.bar(products, x="clicks", y="product_name", orientation="h",
-                          color_discrete_sequence=["#10b981"])
-            fig4.update_layout(height=300, margin=dict(t=10, b=10),
-                               yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig4, use_container_width=True)
+    products = _biz_top_products(days)
+    if not products.empty:
+        st.subheader("Top Clicked Products")
+        fig4 = px.bar(products, x="clicks", y="product_name", orientation="h",
+                      color_discrete_sequence=["#10b981"])
+        fig4.update_layout(height=300, margin=dict(t=10, b=10),
+                           yaxis=dict(autorange="reversed"))
+        st.plotly_chart(fig4, use_container_width=True)
 
     biz_col1, biz_col2 = st.columns(2)
     with biz_col1:
