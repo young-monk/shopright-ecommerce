@@ -1,0 +1,5 @@
+[browser]
+# Point WebSocket connections directly at Cloud Run, bypassing Firebase Hosting's
+# CDN layer which does not forward HTTP→WebSocket Upgrade requests correctly.
+serverAddress = "analytics-dashboard-pmhvxm32ba-uc.a.run.app"
+serverPort = 443
