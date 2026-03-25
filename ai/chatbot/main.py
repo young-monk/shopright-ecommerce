@@ -323,40 +323,51 @@ async def chat_stream(request: ChatRequest):
             llm_span.set_attribute("session_id", session_id)
             llm_span.set_attribute("turn_number", turn_number)
             llm_span.set_attribute("model", LLM_MODEL)
-            try:
-                new_message = Content(role="user", parts=[Part(text=request.message)])
-                async for event in _runner.run_async(
-                    user_id="anon",
-                    session_id=session_id,
-                    new_message=new_message,
-                ):
-                    if not event.content or not event.content.parts:
-                        continue
-
-                    has_function = any(
-                        hasattr(p, "function_call") and p.function_call
-                        or hasattr(p, "function_response") and p.function_response
-                        for p in event.content.parts
-                    )
-                    if has_function:
-                        if rag_ms is None:
-                            rag_ms = int((time.monotonic() - t_llm) * 1000)
-                        continue
-
-                    for part in event.content.parts:
-                        text = getattr(part, "text", None)
-                        if not text:
+            new_message = Content(role="user", parts=[Part(text=request.message)])
+            _max_retries, _retry_delay = 3, 2.0
+            for _attempt in range(_max_retries):
+                try:
+                    async for event in _runner.run_async(
+                        user_id="anon",
+                        session_id=session_id,
+                        new_message=new_message,
+                    ):
+                        if not event.content or not event.content.parts:
                             continue
-                        if first_token:
-                            ttft_ms = int((time.monotonic() - t_llm) * 1000)
-                            first_token = False
-                        full_response += text
-                        yield f"data: {json.dumps({'token': text, 'done': False})}\n\n"
 
-            except Exception as e:
-                logger.error(f"ADK runner error: {e}")
-                llm_error_type = str(type(e).__name__)
-                err_msg = "Sorry, I encountered an error. Please try again."
+                        has_function = any(
+                            hasattr(p, "function_call") and p.function_call
+                            or hasattr(p, "function_response") and p.function_response
+                            for p in event.content.parts
+                        )
+                        if has_function:
+                            if rag_ms is None:
+                                rag_ms = int((time.monotonic() - t_llm) * 1000)
+                            continue
+
+                        for part in event.content.parts:
+                            text = getattr(part, "text", None)
+                            if not text:
+                                continue
+                            if first_token:
+                                ttft_ms = int((time.monotonic() - t_llm) * 1000)
+                                first_token = False
+                            full_response += text
+                            yield f"data: {json.dumps({'token': text, 'done': False})}\n\n"
+                    break  # success — exit retry loop
+
+                except Exception as e:
+                    is_rate_limit = "ResourceExhausted" in type(e).__name__ or "429" in str(e)
+                    if is_rate_limit and _attempt < _max_retries - 1:
+                        wait = _retry_delay * (2 ** _attempt)
+                        logger.warning(f"Rate limit hit (attempt {_attempt+1}/{_max_retries}), retrying in {wait:.1f}s")
+                        await asyncio.sleep(wait)
+                        full_response = ""  # reset for retry
+                        first_token = True
+                        continue
+                    logger.error(f"ADK runner error: {e}")
+                    llm_error_type = str(type(e).__name__)
+                    err_msg = "Sorry, I encountered an error. Please try again."
                 full_response = err_msg
                 llm_span.set_attribute("error", llm_error_type)
                 yield f"data: {json.dumps({'token': err_msg, 'done': False})}\n\n"
