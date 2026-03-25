@@ -31,8 +31,9 @@ Chatbot Service (FastAPI + Google ADK)                         │
     │               ├── Gemini text-embedding-004 (3072-dim)   │
     │               ├── pgvector ANN (Cloud SQL PostgreSQL)    │
     │               └── Vertex AI Ranking API (rerank)        │
-    ├── Gemini 2.5-flash (generation, SSE streaming)           │
-    ├── Gemini 2.0-flash (intent classification, async)        │
+    ├── Gemini 2.5-flash (generation + intent classification)  │
+    ├── OpenTelemetry → Cloud Trace (4 named spans)            │
+    ├── Exponential backoff retry (ResourceExhausted 429)      │
     └── BigQuery async logging (fire-and-forget) ◄─────────── ┘
                     │
                     ▼
@@ -81,7 +82,7 @@ Every user message triggers a two-stage retrieval pipeline before the LLM genera
 | Type | Source | Content |
 |---|---|---|
 | `product` | PostgreSQL products table | Name, SKU, category, brand, price, description, specs |
-| `faq` | `data/faqs.json` | Q&A pairs for store policies (returns, shipping, warranty) |
+| `faq` | `data/faqs.json` | 82 Q&A pairs: store policies, battery compatibility, paint/sealant selection, pricing, power tools, building materials |
 | `review_summary` | `data/reviews.json` | Avg rating + top 5 review snippets per product |
 
 **Ingestion:** `python ai/chatbot/ingest.py` — embeds all three doc types with `task_type=RETRIEVAL_DOCUMENT` and upserts into `knowledge_embeddings` via `ON CONFLICT (doc_type, source_id) DO UPDATE`.
@@ -111,6 +112,11 @@ _runner = Runner(
 - Events with `is_final_response()=True` carry generated text, streamed token-by-token as SSE
 - `InMemorySessionService` holds per-session state within a pod (stateless across pod restarts by design — client sends full history on every request)
 
+**System prompt — gap fixes informed by real traffic analysis:**
+- **Pricing follow-ups**: bot infers product context from conversation history — never asks customers to repeat themselves
+- **Battery compatibility**: explicit guidance that DeWalt/Milwaukee/Ryobi/Makita batteries are NOT cross-compatible; within a brand, same-voltage tools share batteries
+- **Zero-result queries**: when search returns no matches (e.g. paint, sealant), bot explains key specs and attributes to look for, then directs to a store associate — never says "I don't know"
+
 **Streaming:** `/stream` endpoint returns `Content-Type: text/event-stream`. Each token:
 ```
 data: {"token": "The DeWalt ", "done": false}
@@ -139,44 +145,39 @@ All detectors are **pure regex/rule-based** — zero LLM cost, deterministic, su
 
 Every message is classified into one of 6 labels: `product_lookup`, `project_advice`, `compatibility`, `pricing_availability`, `troubleshooting`, `general_chat`.
 
-- Uses **Gemini 2.0-flash** (not 2.5-flash) — lightweight, ~$0.000001/call
+- Uses **Gemini 2.5-flash** — same model as generation, ensuring consistent availability
 - Runs **async and non-blocking** via `asyncio.create_task()` inside `log_to_bigquery()` — user never waits
 - Two calls are `asyncio.gather()`'d in parallel: `classify_intent` + `extract_intent_target`
-- Both return `(result, tokens_in, tokens_out)` via `usage_metadata` for accurate cost tracking
+- `user_intent_target` extracts the specific topic (e.g. "cordless drill", "deck lumber") for recommendation gap analysis
 
 ---
 
-### BigQuery Observability
+### Reliability — Rate Limit Handling
 
-Every chat turn is logged asynchronously to BigQuery. 25+ fields per row:
+The chatbot wraps `runner.run_async()` in an **exponential backoff retry loop** to handle Gemini API 429 errors without surfacing them to customers:
 
-| Field | What it measures |
-|---|---|
-| `latency_ms` | End-to-end response time |
-| `ttft_ms` | Time to first token |
-| `rag_confidence` | Avg cosine distance of retrieved docs (lower = better) |
-| `min_vec_distance` | Closest doc distance |
-| `rerank_used` | Whether Vertex AI Ranking API was invoked |
-| `tokens_in` / `tokens_out` | For cost calculation |
-| `estimated_cost_usd` | Generation cost + intent classification cost |
-| `intent` | Gemini-classified intent label |
-| `user_intent_target` | Extracted topic (e.g. "cordless drill") |
-| `rec_gap` | User wanted X but bot returned different products |
-| `frustration_signal` | Rule-based frustration detection |
-| `hallucination_flag` | Bot had sources but didn't cite product names |
-| `is_unanswered` | 0 sources + uncertainty phrase |
-| `scope_rejected` | Out-of-scope refusal |
-| `vulgar_flag` / `prompt_injection_flag` | Security events |
+```python
+_max_retries, _retry_delay = 3, 2.0
+for _attempt in range(_max_retries):
+    try:
+        async for event in _runner.run_async(...):
+            ...
+        break  # success
+    except Exception as e:
+        is_rate_limit = "ResourceExhausted" in type(e).__name__ or "429" in str(e)
+        if is_rate_limit and _attempt < _max_retries - 1:
+            wait = _retry_delay * (2 ** _attempt)   # 2s → 4s
+            await asyncio.sleep(wait)
+            continue
+        raise
+```
 
-**Logging is fire-and-forget** — `asyncio.create_task(log_to_bigquery(...))` is called after the stream completes. BigQuery latency never affects the user.
-
-**Cost tracking:** `estimated_cost_usd` = Gemini 2.5-flash cost + Gemini 2.0-flash intent cost
-- 2.5-flash: $0.30/1M input · $2.50/1M output
-- 2.0-flash: $0.075/1M input · $0.30/1M output
+- Up to 3 attempts, delays of 2s then 4s
+- Only retries `ResourceExhausted` / 429 — other errors fail immediately
 
 ---
 
-## Multi-Agent Analytics System
+## Analytics Agent
 
 ### Architecture
 
@@ -206,8 +207,6 @@ The analytics service runs a **Google MCP Toolbox for Databases** sidecar (`anal
 - Named queries are tested, parameterized, and cost-predictable
 - Agents pick which tool to call and pass parameters — they never write SQL
 
-**Toolsets:**
-
 | Toolset | Tools | Audience |
 |---|---|---|
 | `devops` | 12 tools | Engineers, on-call SREs |
@@ -217,8 +216,6 @@ The analytics service runs a **Google MCP Toolbox for Databases** sidecar (`anal
 At startup, the orchestrator calls `ToolboxClient.load_toolset()` to fetch tool schemas over OIDC-authenticated HTTPS.
 
 ### Sub-agents
-
-Each sub-agent has a role-specific system prompt, audience-appropriate metric thresholds, and two tools: a report generation function and the Streamlit dashboard URL tool.
 
 | Agent | Metrics focus | Alert thresholds |
 |---|---|---|
@@ -235,6 +232,76 @@ Three-page dashboard at `shopright-dash.web.app`:
 - **Business page:** Avg star rating, positive reviews, thumbs-up rate, chip-click conversion, cost/session + star rating trend, conversion trend, top clicked products, intent distribution, category demand
 
 **WebSocket note:** Streamlit requires a direct WebSocket connection. Firebase CDN cannot forward `HTTP → WebSocket Upgrade` requests. The `shopright-dash` Firebase site uses a **301 redirect** to the Cloud Run URL, bypassing the CDN entirely.
+
+---
+
+## Observability
+
+### BigQuery — Chat Analytics
+
+Every chat turn is logged asynchronously to BigQuery. 25+ fields per row:
+
+| Field | What it measures |
+|---|---|
+| `latency_ms` | End-to-end response time |
+| `ttft_ms` | Time to first token |
+| `rag_confidence` | Avg cosine distance of retrieved docs (lower = better) |
+| `min_vec_distance` | Closest doc distance |
+| `rerank_used` | Whether Vertex AI Ranking API was invoked |
+| `tokens_in` / `tokens_out` | For cost calculation |
+| `estimated_cost_usd` | Generation cost + intent classification cost |
+| `intent` | Gemini-classified intent label |
+| `user_intent_target` | Extracted topic (e.g. "cordless drill") |
+| `rec_gap` | User wanted X but bot returned different products |
+| `frustration_signal` | Rule-based frustration detection |
+| `hallucination_flag` | Bot had sources but didn't cite product names |
+| `is_unanswered` | 0 sources + uncertainty phrase |
+| `scope_rejected` | Out-of-scope refusal |
+| `vulgar_flag` / `prompt_injection_flag` | Security events |
+
+**Logging is fire-and-forget** — `asyncio.create_task(log_to_bigquery(...))` is called after the stream completes. BigQuery latency never affects the user.
+
+**Cost tracking:** `estimated_cost_usd` = Gemini 2.5-flash generation + intent classification
+- $0.30/1M input · $2.50/1M output (both calls)
+- Token counts estimated via `len(text) // 4` when ADK's event stream doesn't expose `usage_metadata`
+
+---
+
+### Distributed Tracing — OpenTelemetry + Cloud Trace
+
+The chatbot is fully instrumented with **OpenTelemetry**, exporting traces to **Google Cloud Trace**.
+
+```python
+# Auto-instrument FastAPI (all HTTP requests)
+FastAPIInstrumentor.instrument_app(app)
+
+# Custom spans for each pipeline stage
+with _tracer.start_as_current_span("embed_query") as span:
+    span.set_attribute("query_length", len(query))
+
+with _tracer.start_as_current_span("vector_search") as span:
+    span.set_attribute("candidates_returned", len(rows))
+    span.set_attribute("db_ms", db_ms)
+
+with _tracer.start_as_current_span("vertex_rerank") as span:
+    span.set_attribute("rerank_used", True)
+
+with _tracer.start_as_current_span("llm_generate") as span:
+    span.set_attribute("session_id", session_id)
+    span.set_attribute("turn_number", turn_number)
+```
+
+**Four named spans per request**, giving end-to-end visibility in Cloud Trace:
+
+| Span | What it covers |
+|---|---|
+| `embed_query` | Gemini embedding call duration |
+| `vector_search` | pgvector ANN query + keyword scoring |
+| `vertex_rerank` | Vertex AI Ranking API call (or fallback) |
+| `llm_generate` | ADK runner → full generation + streaming |
+
+- `BatchSpanProcessor` + `CloudTraceSpanExporter` — non-blocking, batched export
+- Falls back gracefully if Cloud Trace is not enabled in the project
 
 ---
 
@@ -273,7 +340,7 @@ Checkout → WIF auth → docker build -t $REGISTRY/$IMAGE:$SHA → push to Arti
 ```
 WIF auth → gcloud run services update --image $IMAGE:$SHA
 ```
-Uses SHA-tagged images (not `latest`) for traceability and rollback. Guards against deploying to non-existent services (first Terraform run).
+Uses SHA-tagged images (not `latest`) for traceability and rollback.
 
 **Job 3 — `firebase-hosting` (needs: deploy):**
 ```
@@ -288,122 +355,3 @@ GitHub Actions authenticates to GCP without storing service account keys:
 GitHub OIDC token → WIF provider → short-lived GCP access token
 ```
 `attribute_condition` restricts to `assertion.repository == 'org/repo'` — only this repo can impersonate the service account.
-
-### Required GitHub Secrets
-
-| Secret | Description |
-|---|---|
-| `WIF_PROVIDER` | Workload Identity provider resource name |
-| `WIF_SERVICE_ACCOUNT` | `shopright-github-actions@PROJECT_ID.iam.gserviceaccount.com` |
-| `GCP_PROJECT_ID` | GCP project ID |
-| `GEMINI_API_KEY` | Google Gemini API key |
-| `DB_PASSWORD` | Cloud SQL password |
-| `JWT_SECRET` | JWT signing secret |
-| `FIREBASE_TOKEN` | Firebase CI token (`firebase login:ci`) |
-
----
-
-## Local Development
-
-### Prerequisites
-- Docker & Docker Compose
-- Node.js 20+, Python 3.11+
-- `GEMINI_API_KEY`
-
-### Start everything
-
-```bash
-git clone https://github.com/young-monk/shopright-ecommerce.git
-cd shopright-ecommerce
-cp .env.example .env   # set GEMINI_API_KEY at minimum
-docker compose up
-```
-
-| URL | Service |
-|---|---|
-| http://localhost:3000 | Frontend storefront |
-| http://localhost:8000/docs | API Gateway |
-| http://localhost:8004/docs | Chatbot |
-| http://localhost:8005/docs | Analytics |
-
-### Ingest knowledge base
-
-```bash
-cd ai/chatbot
-GEMINI_API_KEY=your_key DATABASE_URL=postgresql://... python ingest.py
-```
-
-Embeds products, FAQs, and review summaries into `knowledge_embeddings`. Safe to re-run — idempotent via `ON CONFLICT DO UPDATE`.
-
----
-
-## Project Structure
-
-```
-shopright-ecommerce/
-├── frontend/                          # Next.js 14, TypeScript, Tailwind
-│
-├── backend/
-│   ├── api-gateway/                   # CORS, routing, proxy
-│   ├── product-service/               # Catalog CRUD
-│   ├── order-service/                 # Cart, checkout
-│   └── user-service/                  # Auth, JWT
-│
-├── ai/
-│   ├── chatbot/
-│   │   ├── main.py                    # FastAPI app + ADK routes
-│   │   ├── config.py                  # Env vars, cost constants, Gemini client
-│   │   ├── rag.py                     # pgvector search + Vertex AI rerank
-│   │   ├── embed.py                   # Gemini embedding API wrapper
-│   │   ├── intent.py                  # Intent classification (gemini-2.0-flash)
-│   │   ├── detection.py               # Safety detectors (regex/rule-based)
-│   │   ├── logging_bq.py              # Async BigQuery logging
-│   │   ├── models.py                  # Pydantic request/response models
-│   │   ├── state.py                   # Shared singletons (db pool, metrics)
-│   │   ├── ingest.py                  # Knowledge base ingestion pipeline
-│   │   └── data/                      # faqs.json, reviews.json
-│   │
-│   └── analytics/
-│       ├── main.py                    # FastAPI app + /analyze endpoints
-│       ├── agents/
-│       │   ├── orchestrator.py        # Root ADK orchestrator + Runner
-│       │   ├── devops_agent.py        # DevOps sub-agent + report tool
-│       │   ├── tech_agent.py          # Tech sub-agent + report tool
-│       │   └── business_agent.py      # Business sub-agent + report tool
-│       ├── tools/
-│       │   ├── bq_tools.py            # Direct BQ query functions
-│       │   ├── dashboard_tool.py      # Streamlit dashboard URL tool
-│       │   ├── gmail_tool.py          # Gmail API email sender
-│       │   └── gemini_summary.py      # Gemini narrative generation
-│       ├── toolbox/
-│       │   └── tools.yaml             # 45 MCP Toolbox named BQ queries
-│       └── dashboard/
-│           ├── app.py                 # Streamlit dashboard (3 pages)
-│           └── Dockerfile
-│
-├── infra/
-│   ├── terraform/main.tf              # All GCP resources
-│   └── sql/
-│       ├── init.sql                   # Schema + indexes
-│       └── seeds.sql                  # ~1000 product seed data
-│
-└── .github/workflows/
-    └── deploy.yml                     # Build → Deploy → Firebase (3-job pipeline)
-```
-
----
-
-## Environment Variables
-
-| Variable | Service | Description |
-|---|---|---|
-| `GEMINI_API_KEY` | Chatbot, Analytics | Google Gemini API key |
-| `DATABASE_URL` | Chatbot | PostgreSQL connection string |
-| `GCP_PROJECT_ID` | Chatbot, Analytics | GCP project (enables BigQuery + Vertex AI) |
-| `LLM_MODEL` | Chatbot | Override LLM model (default: `gemini-2.5-flash`) |
-| `BIGQUERY_DATASET` | Chatbot, Analytics | BQ dataset name (default: `chat_analytics`) |
-| `TOOLBOX_URL` | Analytics | MCP Toolbox sidecar URL |
-| `DASHBOARD_URL` | Analytics | Streamlit dashboard base URL |
-| `DEVOPS_EMAIL` | Analytics | DevOps report recipient |
-| `TECH_EMAIL` | Analytics | Tech report recipient |
-| `BUSINESS_EMAIL` | Analytics | Business report recipient |
