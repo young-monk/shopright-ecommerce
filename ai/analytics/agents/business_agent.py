@@ -12,7 +12,7 @@ from google.adk.agents import LlmAgent
 from tools.bq_tools import get_business_metrics
 from tools.gmail_tool import send_email
 from tools.gemini_summary import gemini_narrative
-from tools.looker_tool import get_looker_business_url
+from tools.dashboard_tool import get_dashboard_business_url
 
 BUSINESS_EMAIL = os.getenv("BUSINESS_EMAIL", "hallyalasridhar@gmail.com")
 
@@ -36,7 +36,7 @@ a{color:#065f46}
 def generate_and_send_business_report(days: int = 30, recipient_email: str = "") -> str:
     """
     Pull business metrics from BigQuery, generate an AI-written analysis,
-    and email it with the Looker Studio dashboard link.
+    and email it with the Streamlit dashboard link.
 
     Args:
         days: Number of days of data to include (default 30 for business cadence).
@@ -51,18 +51,18 @@ def generate_and_send_business_report(days: int = 30, recipient_email: str = "")
 
     narrative = gemini_narrative(data, "business", days)
 
-    looker = get_looker_business_url()
-    if looker["configured"]:
+    dash = get_dashboard_business_url()
+    if dash["configured"]:
         dashboard = (
             f'<div class="dashboard">'
-            f'&#128202; <a href="{looker["url"]}"><strong>View live Business dashboard in Looker Studio &rarr;</strong></a>'
+            f'&#128202; <a href="{dash["url"]}"><strong>View live Business dashboard &rarr;</strong></a>'
             f'</div>'
         )
     else:
         dashboard = (
             '<div class="dashboard" style="background:#fafafa;border-color:#e2e8f0">'
-            '&#128202; <span style="color:#94a3b8">Looker Studio dashboard not yet configured &mdash; '
-            'set <code>LOOKER_STUDIO_BUSINESS_URL</code> to enable.</span>'
+            '&#128202; <span style="color:#94a3b8">Streamlit dashboard not yet configured &mdash; '
+            'set <code>DASHBOARD_URL</code> to enable.</span>'
             '</div>'
         )
 
@@ -104,7 +104,7 @@ You have two types of tools:
    Use these for ad-hoc questions like "which products had the most clicks this month?" or
    "what was our session success rate last week?".
 
-3. **get_looker_business_url** — returns the Looker Studio dashboard link.
+3. **get_dashboard_business_url** — returns the Streamlit dashboard link.
    Always include this in your responses.
 
 Present numbers in plain business language — avoid technical jargon.
@@ -127,6 +127,6 @@ def make_business_agent(toolbox_tools: list) -> LlmAgent:
         instruction=_BUSINESS_INSTRUCTION,
         tools=toolbox_tools + [
             generate_and_send_business_report,
-            get_looker_business_url,
+            get_dashboard_business_url,
         ],
     )

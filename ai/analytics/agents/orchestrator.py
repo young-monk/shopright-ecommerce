@@ -4,7 +4,7 @@ loads the three audience toolsets from the sidecar server.
 
 Flow:
   /analyze/run  → composite report functions (query BQ + chart + email)
-  /analyze/chat → toolbox BQ tools + Looker URLs for ad-hoc natural language questions
+  /analyze/chat → toolbox BQ tools + Streamlit dashboard URLs for ad-hoc natural language questions
 """
 from __future__ import annotations
 

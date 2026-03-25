@@ -12,7 +12,7 @@ from google.adk.agents import LlmAgent
 from tools.bq_tools import get_tech_metrics
 from tools.gmail_tool import send_email
 from tools.gemini_summary import gemini_narrative
-from tools.looker_tool import get_looker_tech_url
+from tools.dashboard_tool import get_dashboard_tech_url
 
 TECH_EMAIL = os.getenv("TECH_EMAIL", "hallyalasridhar@gmail.com")
 
@@ -36,7 +36,7 @@ a{color:#2563eb}
 def generate_and_send_tech_report(days: int = 7, recipient_email: str = "") -> str:
     """
     Pull technical/ML metrics from BigQuery, generate an AI-written analysis,
-    and email it with the Looker Studio dashboard link.
+    and email it with the Streamlit dashboard link.
 
     Args:
         days: Number of days of data to include (default 7).
@@ -51,18 +51,18 @@ def generate_and_send_tech_report(days: int = 7, recipient_email: str = "") -> s
 
     narrative = gemini_narrative(data, "tech", days)
 
-    looker = get_looker_tech_url()
-    if looker["configured"]:
+    dash = get_dashboard_tech_url()
+    if dash["configured"]:
         dashboard = (
             f'<div class="dashboard">'
-            f'&#128202; <a href="{looker["url"]}"><strong>View live Technical dashboard in Looker Studio &rarr;</strong></a>'
+            f'&#128202; <a href="{dash["url"]}"><strong>View live Technical dashboard &rarr;</strong></a>'
             f'</div>'
         )
     else:
         dashboard = (
             '<div class="dashboard" style="background:#fafafa;border-color:#e2e8f0">'
-            '&#128202; <span style="color:#94a3b8">Looker Studio dashboard not yet configured &mdash; '
-            'set <code>LOOKER_STUDIO_TECH_URL</code> to enable.</span>'
+            '&#128202; <span style="color:#94a3b8">Streamlit dashboard not yet configured &mdash; '
+            'set <code>DASHBOARD_URL</code> to enable.</span>'
             '</div>'
         )
 
@@ -97,14 +97,14 @@ You have two types of tools:
 
 1. **Report tool** — generate_and_send_tech_report(days, recipient_email)
    Use this when the user asks to "run", "send", or "generate" a technical report.
-   It queries BigQuery, generates an AI analysis, and emails it with the Looker dashboard link.
+   It queries BigQuery, generates an AI analysis, and emails it with the Streamlit dashboard link.
 
 2. **BigQuery query tools** (via MCP Toolbox) — named queries like get_tech_rag_daily,
    get_tech_cost_summary, get_tech_intent_distribution, get_tech_catalog_gaps, etc.
    Use these for ad-hoc questions like "what is our RAG confidence this week?" or
    "show me which categories have the worst retrieval quality".
 
-3. **get_looker_tech_url** — returns the Looker Studio dashboard link.
+3. **get_dashboard_tech_url** — returns the Streamlit dashboard link.
    Include this link in any detailed metric response.
 
 Key thresholds to flag:
@@ -130,6 +130,6 @@ def make_tech_agent(toolbox_tools: list) -> LlmAgent:
         instruction=_TECH_INSTRUCTION,
         tools=toolbox_tools + [
             generate_and_send_tech_report,
-            get_looker_tech_url,
+            get_dashboard_tech_url,
         ],
     )

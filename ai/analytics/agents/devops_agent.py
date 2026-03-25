@@ -12,7 +12,7 @@ from google.adk.agents import LlmAgent
 from tools.bq_tools import get_devops_metrics
 from tools.gmail_tool import send_email
 from tools.gemini_summary import gemini_narrative
-from tools.looker_tool import get_looker_devops_url
+from tools.dashboard_tool import get_dashboard_devops_url
 
 DEVOPS_EMAIL = os.getenv("DEVOPS_EMAIL", "hallyalasridhar@gmail.com")
 
@@ -36,7 +36,7 @@ a{color:#2563eb}
 def generate_and_send_devops_report(days: int = 7, recipient_email: str = "") -> str:
     """
     Pull DevOps metrics from BigQuery, generate an AI-written analysis,
-    and email it with the Looker Studio dashboard link.
+    and email it with the Streamlit dashboard link.
 
     Args:
         days: Number of days of data to include (default 7).
@@ -51,18 +51,18 @@ def generate_and_send_devops_report(days: int = 7, recipient_email: str = "") ->
 
     narrative = gemini_narrative(data, "devops", days)
 
-    looker = get_looker_devops_url()
-    if looker["configured"]:
+    dash = get_dashboard_devops_url()
+    if dash["configured"]:
         dashboard = (
             f'<div class="dashboard">'
-            f'&#128202; <a href="{looker["url"]}"><strong>View live DevOps dashboard in Looker Studio &rarr;</strong></a>'
+            f'&#128202; <a href="{dash["url"]}"><strong>View live DevOps dashboard &rarr;</strong></a>'
             f'</div>'
         )
     else:
         dashboard = (
             '<div class="dashboard" style="background:#fafafa;border-color:#e2e8f0">'
-            '&#128202; <span style="color:#94a3b8">Looker Studio dashboard not yet configured &mdash; '
-            'set <code>LOOKER_STUDIO_DEVOPS_URL</code> to enable.</span>'
+            '&#128202; <span style="color:#94a3b8">Streamlit dashboard not yet configured &mdash; '
+            'set <code>DASHBOARD_URL</code> to enable.</span>'
             '</div>'
         )
 
@@ -97,14 +97,14 @@ You have two types of tools:
 
 1. **Report tool** — generate_and_send_devops_report(days, recipient_email)
    Use this when the user asks to "run", "send", or "generate" a report.
-   It queries BigQuery, generates an AI analysis, and emails it with the Looker dashboard link.
+   It queries BigQuery, generates an AI analysis, and emails it with the Streamlit dashboard link.
 
 2. **BigQuery query tools** (via MCP Toolbox) — named queries like get_devops_daily,
    get_devops_summary, get_devops_error_types, get_devops_security_events, etc.
    Use these for ad-hoc questions like "what was the error rate yesterday?" or
    "show me latency trends for the past 2 weeks".
 
-3. **get_looker_devops_url** — returns the Looker Studio dashboard link.
+3. **get_dashboard_devops_url** — returns the Streamlit dashboard link.
    Include this link in any response that involves metrics.
 
 Key metric thresholds to call out:
@@ -125,6 +125,6 @@ def make_devops_agent(toolbox_tools: list) -> LlmAgent:
         instruction=_DEVOPS_INSTRUCTION,
         tools=toolbox_tools + [
             generate_and_send_devops_report,
-            get_looker_devops_url,
+            get_dashboard_devops_url,
         ],
     )
