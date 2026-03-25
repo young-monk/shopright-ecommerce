@@ -26,13 +26,11 @@
       "site": "shopright-dash",
       "public": "firebase-public",
       "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
-      "rewrites": [
+      "redirects": [
         {
           "source": "**",
-          "run": {
-            "serviceId": "analytics-dashboard",
-            "region": "us-central1"
-          }
+          "destination": "https://analytics-dashboard-pmhvxm32ba-uc.a.run.app",
+          "type": 301
         }
       ]
     }
