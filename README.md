@@ -28,7 +28,7 @@ Chatbot Service (FastAPI + Google ADK)                         │
     ├── Safety detection layer (regex, rules)                  │
     ├── Google ADK LlmAgent + Runner                           │
     │       └── search_products tool                           │
-    │               ├── Gemini text-embedding-004 (3072-dim)   │
+    │               ├── Gemini gemini-embedding-001 (3072-dim)  │
     │               ├── pgvector ANN (Cloud SQL PostgreSQL)    │
     │               └── Vertex AI Ranking API (rerank)        │
     ├── Gemini 2.5-flash (generation + intent classification)  │
@@ -63,7 +63,7 @@ Chatbot Service (FastAPI + Google ADK)                         │
 Every user message triggers a two-stage retrieval pipeline before the LLM generates a response.
 
 **Stage 1 — Hybrid ANN search (pgvector)**
-- Query is embedded with Gemini `text-embedding-004` (`task_type=RETRIEVAL_QUERY`, 3072-dim)
+- Query is embedded with Gemini `gemini-embedding-001` (`task_type=RETRIEVAL_QUERY`, 3072-dim)
 - PostgreSQL `knowledge_embeddings` table is searched using cosine distance on a `halfvec(3072)` HNSW index
 - `halfvec` lifts pgvector's 2000-dim ANN limit to 16,000 dims while halving storage
 - A keyword bonus score (`CASE WHEN content ~ 'regex' THEN 0.15 ELSE 0`) is subtracted from cosine distance to create a hybrid rank
