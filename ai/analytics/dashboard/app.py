@@ -13,8 +13,6 @@ import plotly.graph_objects as go
 import streamlit as st
 from google.cloud import bigquery
 
-import sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
 from queries import (
     devops_summary_sql, devops_daily_sql, devops_error_types_sql,
     tech_summary_sql, tech_daily_sql, tech_latency_breakdown_sql,

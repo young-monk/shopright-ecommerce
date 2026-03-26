@@ -4,6 +4,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 COPY .streamlit/ .streamlit/
 COPY app.py .
+COPY queries.py .
 EXPOSE 8080
 CMD ["streamlit", "run", "app.py", \
      "--server.port=8080", \

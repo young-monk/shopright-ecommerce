@@ -78,6 +78,10 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${{ env.REGISTRY }} --quiet
 
+      - name: Prepare dashboard build context
+        if: matrix.service == 'analytics-dashboard'
+        run: cp ai/analytics/queries.py ai/analytics/dashboard/queries.py
+
       - name: Build and push
         env:
           IMAGE: ${{ env.REGISTRY }}/${{ secrets.GCP_PROJECT_ID }}/shopright/${{ matrix.image }}
