@@ -13,6 +13,17 @@ import plotly.graph_objects as go
 import streamlit as st
 from google.cloud import bigquery
 
+import sys, pathlib
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+from queries import (
+    devops_summary_sql, devops_daily_sql, devops_error_types_sql,
+    tech_summary_sql, tech_daily_sql, tech_latency_breakdown_sql,
+    tech_intents_sql, tech_gaps_sql,
+    biz_sat_summary_sql, biz_sat_daily_sql, biz_feedback_sql,
+    biz_conversion_sql, biz_top_products_sql, biz_category_demand_sql,
+    biz_outcomes_sql,
+)
+
 GCP_PROJECT = os.getenv("GCP_PROJECT_ID", "")
 BQ_DATASET = "chat_analytics"
 
@@ -21,10 +32,6 @@ BQ_DATASET = "chat_analytics"
 
 def _client() -> bigquery.Client:
     return bigquery.Client(project=GCP_PROJECT or None)
-
-
-def _t(table: str) -> str:
-    return f"`{GCP_PROJECT}.{BQ_DATASET}.{table}`"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -43,211 +50,52 @@ def _scalar(df: pd.DataFrame, col: str, default=0):
     return default if pd.isna(val) else val
 
 
-# ── Queries ───────────────────────────────────────────────────────────────────
+# ── Query wrappers (delegate SQL to queries.py) ────────────────────────────────
 
 def _devops_summary(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      COUNT(*)                                                                   AS total_requests,
-      COUNT(DISTINCT session_id)                                                 AS total_sessions,
-      ROUND(SAFE_DIVIDE(COUNTIF(llm_error=TRUE)*100.0, COUNT(*)), 2)            AS error_rate_pct,
-      CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(50)] AS INT64)               AS p50_latency_ms,
-      CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)               AS p95_latency_ms,
-      CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                   AS avg_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)          AS unanswered_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(scope_rejected=TRUE)*100.0, COUNT(*)), 2)        AS scope_rejected_rate_pct,
-      COUNTIF(vulgar_flag = TRUE)                                                AS vulgar_blocks,
-      COUNTIF(prompt_injection_flag = TRUE)                                      AS injection_blocks
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """)
-
+    return _q(devops_summary_sql(GCP_PROJECT, BQ_DATASET, days))
 
 def _devops_daily(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      DATE(timestamp)                                                            AS date,
-      COUNT(*)                                                                   AS requests,
-      COUNT(DISTINCT session_id)                                                 AS sessions,
-      ROUND(SAFE_DIVIDE(COUNTIF(llm_error=TRUE)*100.0, COUNT(*)), 2)            AS error_rate_pct,
-      CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(50)] AS INT64)               AS p50_latency_ms,
-      CAST(APPROX_QUANTILES(latency_ms,100)[OFFSET(95)] AS INT64)               AS p95_latency_ms,
-      CAST(AVG(COALESCE(ttft_ms,0)) AS INT64)                                   AS avg_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered=TRUE)*100.0, COUNT(*)), 2)          AS unanswered_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(scope_rejected=TRUE)*100.0, COUNT(*)), 2)        AS scope_rejected_rate_pct
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date ORDER BY date
-    """)
-
-
-def _tech_summary(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      ROUND(AVG(COALESCE(rag_confidence,0)), 4)                                 AS avg_rag_confidence,
-      ROUND(SAFE_DIVIDE(COUNTIF(frustration_signal=TRUE)*100.0, COUNT(*)), 2)  AS frustration_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(rec_gap=TRUE)*100.0, COUNT(*)), 2)             AS rec_gap_rate_pct,
-      ROUND(SUM(COALESCE(estimated_cost_usd,0)), 4)                             AS total_cost_usd,
-      ROUND(SAFE_DIVIDE(SUM(COALESCE(estimated_cost_usd,0)),
-            COUNT(DISTINCT session_id)), 6)                                      AS cost_per_session_usd,
-      ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag=TRUE)*100.0, COUNT(*)), 2)  AS citation_gap_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(rerank_used=TRUE)*100.0, COUNT(*)), 2)         AS rerank_used_pct,
-      ROUND(AVG(COALESCE(turn_number, 1)), 1)                                   AS avg_turn_number,
-      ROUND(AVG(COALESCE(sources_count, 0)), 1)                                 AS avg_sources_count,
-      ROUND(SAFE_DIVIDE(COUNTIF(query_rewritten=TRUE)*100.0, COUNT(*)), 2)     AS query_rewritten_rate_pct,
-      COUNTIF(wellbeing_triggered=TRUE)                                          AS wellbeing_triggered_count,
-      CAST(AVG(COALESCE(tokens_in, 0)) AS INT64)                                AS avg_tokens_in,
-      CAST(AVG(COALESCE(tokens_out, 0)) AS INT64)                               AS avg_tokens_out,
-      ROUND(AVG(COALESCE(context_pct, 0)), 2)                                   AS avg_context_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(rag_empty=TRUE)*100.0, COUNT(*)), 2)           AS rag_empty_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(price_filter_used=TRUE)*100.0, COUNT(*)), 2)   AS price_filter_rate_pct,
-      CAST(AVG(COALESCE(ann_candidates_count, 0)) AS INT64)                     AS avg_ann_candidates,
-      ROUND(AVG(COALESCE(unique_brands_count, 0)), 1)                           AS avg_unique_brands
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """)
-
-
-def _tech_daily(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      DATE(timestamp)                                                            AS date,
-      ROUND(AVG(COALESCE(rag_confidence,0)), 4)                                 AS avg_rag_confidence,
-      ROUND(SAFE_DIVIDE(COUNTIF(frustration_signal=TRUE)*100.0, COUNT(*)), 2)  AS frustration_rate_pct,
-      ROUND(SAFE_DIVIDE(COUNTIF(rec_gap=TRUE)*100.0, COUNT(*)), 2)             AS rec_gap_rate_pct,
-      ROUND(SUM(COALESCE(estimated_cost_usd,0)), 6)                             AS cost_usd
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date ORDER BY date
-    """)
-
-
-def _tech_latency_breakdown(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      DATE(timestamp)                                                            AS date,
-      CAST(AVG(COALESCE(embed_ms, 0)) AS INT64)                                 AS avg_embed_ms,
-      CAST(AVG(COALESCE(db_ms, 0)) AS INT64)                                    AS avg_db_ms,
-      CAST(AVG(COALESCE(llm_ms, 0)) AS INT64)                                   AS avg_llm_ms
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date ORDER BY date
-    """)
-
-
-def _tech_intents(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT COALESCE(intent, 'unknown') AS intent, COUNT(*) AS count
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY intent ORDER BY count DESC
-    """)
-
-
-def _tech_gaps(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT user_message, COALESCE(detected_category, 'Unknown') AS category, COUNT(*) AS frequency
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      AND is_unanswered = TRUE
-    GROUP BY user_message, category
-    ORDER BY frequency DESC LIMIT 15
-    """)
-
-
-def _biz_sat_summary(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      ROUND(AVG(stars), 2)                                                       AS avg_stars,
-      COUNT(*)                                                                   AS total_reviews,
-      ROUND(SAFE_DIVIDE(COUNTIF(stars>=4)*100.0, COUNT(*)), 2)                  AS positive_rate_pct
-    FROM {_t("session_reviews")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """)
-
-
-def _biz_sat_daily(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT DATE(timestamp) AS date, ROUND(AVG(stars), 2) AS avg_stars
-    FROM {_t("session_reviews")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date ORDER BY date
-    """)
-
-
-def _biz_feedback(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT ROUND(SAFE_DIVIDE(COUNTIF(rating=1)*100.0, COUNT(*)), 2) AS thumbs_up_rate_pct
-    FROM {_t("feedback")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """)
-
-
-def _biz_conversion(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT e.date,
-           ROUND(SAFE_DIVIDE(e.sessions_with_clicks * 100.0, t.total_sessions), 2) AS conversion_rate_pct
-    FROM (
-      SELECT DATE(timestamp) AS date, COUNT(DISTINCT session_id) AS sessions_with_clicks
-      FROM {_t("chat_events")}
-      WHERE event_type = 'chip_click'
-        AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      GROUP BY date
-    ) e
-    LEFT JOIN (
-      SELECT DATE(timestamp) AS date, COUNT(DISTINCT session_id) AS total_sessions
-      FROM {_t("chat_logs")}
-      WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      GROUP BY date
-    ) t ON e.date = t.date
-    ORDER BY e.date
-    """)
-
-
-def _biz_top_products(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT product_name, COUNT(*) AS clicks
-    FROM {_t("chat_events")}
-    WHERE event_type = 'chip_click'
-      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      AND product_name IS NOT NULL
-    GROUP BY product_name ORDER BY clicks DESC LIMIT 10
-    """)
-
+    return _q(devops_daily_sql(GCP_PROJECT, BQ_DATASET, days))
 
 def _devops_error_types(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      COALESCE(llm_error_type, 'unknown')                                        AS error_type,
-      COUNT(*)                                                                   AS count
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      AND llm_error = TRUE
-    GROUP BY error_type ORDER BY count DESC
-    """)
+    return _q(devops_error_types_sql(GCP_PROJECT, BQ_DATASET, days))
 
+def _tech_summary(days: int) -> pd.DataFrame:
+    return _q(tech_summary_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _tech_daily(days: int) -> pd.DataFrame:
+    return _q(tech_daily_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _tech_latency_breakdown(days: int) -> pd.DataFrame:
+    return _q(tech_latency_breakdown_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _tech_intents(days: int) -> pd.DataFrame:
+    return _q(tech_intents_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _tech_gaps(days: int) -> pd.DataFrame:
+    return _q(tech_gaps_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _biz_sat_summary(days: int) -> pd.DataFrame:
+    return _q(biz_sat_summary_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _biz_sat_daily(days: int) -> pd.DataFrame:
+    return _q(biz_sat_daily_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _biz_feedback(days: int) -> pd.DataFrame:
+    return _q(biz_feedback_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _biz_conversion(days: int) -> pd.DataFrame:
+    return _q(biz_conversion_sql(GCP_PROJECT, BQ_DATASET, days))
+
+def _biz_top_products(days: int) -> pd.DataFrame:
+    return _q(biz_top_products_sql(GCP_PROJECT, BQ_DATASET, days))
 
 def _biz_category_demand(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT
-      COALESCE(detected_category, 'Unknown')                                     AS category,
-      COUNT(*)                                                                   AS requests,
-      ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 1)                        AS pct
-    FROM {_t("chat_logs")}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      AND detected_category IS NOT NULL
-    GROUP BY category ORDER BY requests DESC LIMIT 12
-    """)
-
+    return _q(biz_category_demand_sql(GCP_PROJECT, BQ_DATASET, days))
 
 def _biz_outcomes(days: int) -> pd.DataFrame:
-    return _q(f"""
-    SELECT outcome, COUNT(*) AS sessions,
-           ROUND(COUNT(*)*100.0/SUM(COUNT(*)) OVER(), 2) AS pct
-    FROM {_t("session_outcomes")}
-    WHERE session_end_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY outcome ORDER BY sessions DESC
-    """)
+    return _q(biz_outcomes_sql(GCP_PROJECT, BQ_DATASET, days))
 
 
 # ── Pages ──────────────────────────────────────────────────────────────────────

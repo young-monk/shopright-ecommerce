@@ -18,6 +18,14 @@ from pydantic import BaseModel
 
 from google.cloud import bigquery
 
+from queries import (
+    overview_sql, top_questions_sql, daily_volume_sql, rag_performance_sql,
+    top_products_mentioned_sql, devops_infra_daily_sql, devops_infra_summary_sql,
+    tech_model_daily_sql, tech_model_summary_sql, tech_gaps_sql,
+    tech_category_performance_sql, biz_sat_daily_sql, biz_sat_full_summary_sql,
+    biz_feedback_full_sql, biz_conversion_raw_sql, biz_top_products_sql,
+)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -82,19 +90,7 @@ async def get_overview(days: int = 7):
     """High-level chat metrics for the last N days."""
     if not GCP_PROJECT:
         return _no_gcp()
-    sql = f"""
-    SELECT
-      COUNT(*) AS total_messages,
-      COUNT(DISTINCT session_id) AS unique_sessions,
-      AVG(message_length) AS avg_message_length,
-      AVG(response_length) AS avg_response_length,
-      AVG(sources_count) AS avg_sources_per_response,
-      COUNTIF(sources_count = 0) AS messages_without_rag,
-      COUNTIF(sources_count > 0) AS messages_with_rag
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """
-    results = run_query(sql)
+    results = run_query(overview_sql(GCP_PROJECT, BQ_DATASET, days))
     return results[0] if results else {}
 
 
@@ -103,18 +99,7 @@ async def get_top_questions(days: int = 7, limit: int = 20):
     """Most common user questions by keyword clustering."""
     if not GCP_PROJECT:
         return _no_gcp()
-    sql = f"""
-    SELECT
-      user_message,
-      COUNT(*) AS frequency,
-      AVG(sources_count) AS avg_rag_sources
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY user_message
-    ORDER BY frequency DESC
-    LIMIT {limit}
-    """
-    return {"questions": run_query(sql)}
+    return {"questions": run_query(top_questions_sql(GCP_PROJECT, BQ_DATASET, days, limit))}
 
 
 @app.get("/analytics/daily-volume")
@@ -122,17 +107,7 @@ async def get_daily_volume(days: int = 30):
     """Daily message volume trend."""
     if not GCP_PROJECT:
         return _no_gcp()
-    sql = f"""
-    SELECT
-      DATE(timestamp) AS date,
-      COUNT(*) AS messages,
-      COUNT(DISTINCT session_id) AS sessions
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date
-    ORDER BY date DESC
-    """
-    return {"daily_volume": run_query(sql)}
+    return {"daily_volume": run_query(daily_volume_sql(GCP_PROJECT, BQ_DATASET, days))}
 
 
 @app.get("/analytics/rag-performance")
@@ -140,17 +115,7 @@ async def get_rag_performance(days: int = 7):
     """How well RAG is performing - source retrieval rates."""
     if not GCP_PROJECT:
         return _no_gcp()
-    sql = f"""
-    SELECT
-      sources_count,
-      COUNT(*) AS message_count,
-      ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS percentage
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY sources_count
-    ORDER BY sources_count
-    """
-    return {"rag_distribution": run_query(sql)}
+    return {"rag_distribution": run_query(rag_performance_sql(GCP_PROJECT, BQ_DATASET, days))}
 
 
 @app.get("/analytics/top-products-mentioned")
@@ -158,20 +123,7 @@ async def get_top_products(days: int = 7, limit: int = 10):
     """Which products are mentioned most in chat sources."""
     if not GCP_PROJECT:
         return _no_gcp()
-    sql = f"""
-    SELECT
-      JSON_EXTRACT_SCALAR(src, '$.name') AS product_name,
-      JSON_EXTRACT_SCALAR(src, '$.price') AS price,
-      COUNT(*) AS mentions
-    FROM {_table(BQ_TABLE)},
-    UNNEST(JSON_EXTRACT_ARRAY(sources_used)) AS src
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      AND sources_used IS NOT NULL
-    GROUP BY product_name, price
-    ORDER BY mentions DESC
-    LIMIT {limit}
-    """
-    return {"top_products": run_query(sql)}
+    return {"top_products": run_query(top_products_mentioned_sql(GCP_PROJECT, BQ_DATASET, days, limit))}
 
 
 @app.get("/analytics/sessions/{session_id}")
@@ -196,35 +148,8 @@ async def get_infra_metrics(days: int = 14):
     """Infrastructure metrics: daily request volume, error rate, p95 latency."""
     if not GCP_PROJECT:
         return _no_gcp()
-    daily_sql = f"""
-    SELECT
-      DATE(timestamp) AS date,
-      COUNT(*) AS requests,
-      COUNT(DISTINCT session_id) AS sessions,
-      COUNTIF(llm_error = TRUE) AS errors,
-      ROUND(SAFE_DIVIDE(COUNTIF(llm_error = TRUE) * 100.0, COUNT(*)), 2) AS error_rate_pct,
-      CAST(APPROX_QUANTILES(latency_ms, 100)[OFFSET(95)] AS INT64) AS p95_latency_ms,
-      CAST(APPROX_QUANTILES(latency_ms, 100)[OFFSET(50)] AS INT64) AS p50_latency_ms,
-      CAST(AVG(latency_ms) AS INT64) AS avg_latency_ms
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date
-    ORDER BY date
-    """
-    summary_sql = f"""
-    SELECT
-      COUNT(*) AS total_requests,
-      COUNT(DISTINCT session_id) AS total_sessions,
-      COUNTIF(llm_error = TRUE) AS total_errors,
-      ROUND(SAFE_DIVIDE(COUNTIF(llm_error = TRUE) * 100.0, COUNT(*)), 2) AS error_rate_pct,
-      CAST(APPROX_QUANTILES(latency_ms, 100)[OFFSET(95)] AS INT64) AS p95_latency_ms,
-      CAST(APPROX_QUANTILES(latency_ms, 100)[OFFSET(50)] AS INT64) AS p50_latency_ms,
-      CAST(AVG(latency_ms) AS INT64) AS avg_latency_ms
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """
-    daily   = run_query(daily_sql)
-    summary = run_query(summary_sql)
+    daily   = run_query(devops_infra_daily_sql(GCP_PROJECT, BQ_DATASET, days))
+    summary = run_query(devops_infra_summary_sql(GCP_PROJECT, BQ_DATASET, days))
     return {"period_days": days, "summary": summary[0] if summary else {}, "daily": daily}
 
 
@@ -233,63 +158,10 @@ async def get_model_metrics(days: int = 14):
     """Model metrics: cost trends, RAG quality, TTFT, catalog gaps."""
     if not GCP_PROJECT:
         return _no_gcp()
-    daily_sql = f"""
-    SELECT
-      DATE(timestamp) AS date,
-      ROUND(SUM(COALESCE(estimated_cost_usd, 0)), 6) AS cost_usd,
-      CAST(AVG(COALESCE(ttft_ms, 0)) AS INT64) AS avg_ttft_ms,
-      CAST(AVG(COALESCE(llm_ms, 0)) AS INT64) AS avg_llm_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered = TRUE OR scope_rejected = TRUE) * 100.0, COUNT(*)), 2) AS unanswered_rate_pct,
-      ROUND(AVG(COALESCE(rag_confidence, 0)), 4) AS avg_rag_confidence,
-      CAST(AVG(COALESCE(tokens_in, 0)) AS INT64) AS avg_tokens_in,
-      CAST(AVG(COALESCE(tokens_out, 0)) AS INT64) AS avg_tokens_out
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date
-    ORDER BY date
-    """
-    summary_sql = f"""
-    SELECT
-      ROUND(SUM(COALESCE(estimated_cost_usd, 0)), 4) AS total_cost_usd,
-      ROUND(AVG(COALESCE(estimated_cost_usd, 0)) * 1000, 4) AS cost_per_1k_requests_usd,
-      CAST(APPROX_QUANTILES(ttft_ms, 100)[OFFSET(95)] AS INT64) AS p95_ttft_ms,
-      CAST(AVG(COALESCE(ttft_ms, 0)) AS INT64) AS avg_ttft_ms,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered = TRUE OR scope_rejected = TRUE) * 100.0, COUNT(*)), 2) AS unanswered_rate_pct,
-      ROUND(AVG(COALESCE(rag_confidence, 0)), 4) AS avg_rag_confidence,
-      ROUND(SAFE_DIVIDE(COUNTIF(hallucination_flag = TRUE) * 100.0, COUNT(*)), 2) AS citation_gap_rate_pct,
-      CAST(AVG(COALESCE(tokens_in, 0)) AS INT64) AS avg_tokens_in,
-      CAST(AVG(COALESCE(tokens_out, 0)) AS INT64) AS avg_tokens_out
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """
-    gaps_sql = f"""
-    SELECT
-      user_message,
-      COALESCE(detected_category, 'Unknown') AS category,
-      COUNT(*) AS frequency
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      AND is_unanswered = TRUE
-    GROUP BY user_message, category
-    ORDER BY frequency DESC
-    LIMIT 20
-    """
-    category_sql = f"""
-    SELECT
-      COALESCE(detected_category, 'General') AS category,
-      COUNT(*) AS requests,
-      COUNTIF(is_unanswered = TRUE) AS unanswered,
-      ROUND(SAFE_DIVIDE(COUNTIF(is_unanswered = TRUE) * 100.0, COUNT(*)), 2) AS unanswered_rate_pct,
-      ROUND(AVG(COALESCE(rag_confidence, 0)), 4) AS avg_rag_confidence
-    FROM {_table(BQ_TABLE)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY category
-    ORDER BY requests DESC
-    """
-    daily      = run_query(daily_sql)
-    summary    = run_query(summary_sql)
-    gaps       = run_query(gaps_sql)
-    categories = run_query(category_sql)
+    daily      = run_query(tech_model_daily_sql(GCP_PROJECT, BQ_DATASET, days))
+    summary    = run_query(tech_model_summary_sql(GCP_PROJECT, BQ_DATASET, days))
+    gaps       = run_query(tech_gaps_sql(GCP_PROJECT, BQ_DATASET, days))
+    categories = run_query(tech_category_performance_sql(GCP_PROJECT, BQ_DATASET, days))
     return {
         "period_days": days,
         "summary": summary[0] if summary else {},
@@ -304,64 +176,13 @@ async def get_business_metrics(days: int = 30):
     """Business metrics: satisfaction, chip-click conversion, top products."""
     if not GCP_PROJECT:
         return _no_gcp()
-    satisfaction_sql = f"""
-    SELECT
-      DATE(timestamp) AS date,
-      ROUND(AVG(stars), 2) AS avg_stars,
-      COUNT(*) AS review_count
-    FROM {_table(BQ_REVIEWS)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date
-    ORDER BY date
-    """
-    feedback_sql = f"""
-    SELECT
-      COUNTIF(rating = 1)  AS thumbs_up,
-      COUNTIF(rating = -1) AS thumbs_down,
-      COUNT(*) AS total_feedback,
-      ROUND(SAFE_DIVIDE(COUNTIF(rating = 1) * 100.0, COUNT(*)), 2) AS positive_rate_pct
-    FROM {_table(BQ_FEEDBACK)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """
-    conversion_sql = f"""
-    SELECT
-      DATE(timestamp) AS date,
-      COUNT(*) AS chip_clicks,
-      COUNT(DISTINCT session_id) AS sessions_with_clicks
-    FROM {_table(BQ_EVENTS)}
-    WHERE event_type = 'chip_click'
-      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    GROUP BY date
-    ORDER BY date
-    """
-    top_clicked_sql = f"""
-    SELECT
-      product_name,
-      COUNT(*) AS clicks
-    FROM {_table(BQ_EVENTS)}
-    WHERE event_type = 'chip_click'
-      AND timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-      AND product_name IS NOT NULL
-    GROUP BY product_name
-    ORDER BY clicks DESC
-    LIMIT 10
-    """
-    satisfaction_summary_sql = f"""
-    SELECT
-      ROUND(AVG(stars), 2) AS avg_stars,
-      COUNT(*) AS total_reviews,
-      COUNTIF(stars >= 4) AS positive_reviews,
-      ROUND(SAFE_DIVIDE(COUNTIF(stars >= 4) * 100.0, COUNT(*)), 2) AS positive_rate_pct
-    FROM {_table(BQ_REVIEWS)}
-    WHERE timestamp >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL {days} DAY)
-    """
     return {
         "period_days": days,
-        "satisfaction_summary": (run_query(satisfaction_summary_sql) or [{}])[0],
-        "feedback_summary": (run_query(feedback_sql) or [{}])[0],
-        "satisfaction_trend": run_query(satisfaction_sql),
-        "conversion_trend": run_query(conversion_sql),
-        "top_clicked_products": run_query(top_clicked_sql),
+        "satisfaction_summary": (run_query(biz_sat_full_summary_sql(GCP_PROJECT, BQ_DATASET, days)) or [{}])[0],
+        "feedback_summary":     (run_query(biz_feedback_full_sql(GCP_PROJECT, BQ_DATASET, days)) or [{}])[0],
+        "satisfaction_trend":   run_query(biz_sat_daily_sql(GCP_PROJECT, BQ_DATASET, days)),
+        "conversion_trend":     run_query(biz_conversion_raw_sql(GCP_PROJECT, BQ_DATASET, days)),
+        "top_clicked_products": run_query(biz_top_products_sql(GCP_PROJECT, BQ_DATASET, days)),
     }
 
 
